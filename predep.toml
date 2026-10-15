@@ -1,0 +1,65 @@
+# predep.toml — stage manifest for holdfast
+#
+# Replaces CMake. The build itself is described in premake5.lua and driven by
+# the `build` stage below via predep's premake5 integration (premake5 gmake +
+# make). No vendored C++ dependencies, so there is no vendor stage.
+#
+# Usage (predep resolves stages in dependency order):
+#   predep            # build the holdfast binary            -> bin/holdfast
+#   predep check      # build + run the unit tests
+#   predep e2e        # real-bwrap smoke test (non-root, needs userns)
+#   predep install    # install binary + example profiles + docs
+#   predep clean      # remove build artifacts
+#
+# "Zero warnings is the bar": -Werror is ON by default (see premake5.lua).
+# To relax it (e.g. for a quick local build):   HOLDFAST_WERROR=OFF predep
+# This mirrors the previous `cmake -DHOLDFAST_WERROR=ON` default.
+
+main = "build"
+project = "holdfast"
+
+[[stages]]
+name = "build"
+description = "Build holdfast with premake5 (native)"
+type = "premake5"
+config = "release"
+outputs = ["root://bin/holdfast"]
+clean = true
+clean_paths = ["root://obj"]
+
+[[stages]]
+name = "test"
+description = "Run the unit-test binary"
+type = "run"
+depends = ["build"]
+commands = ["./bin/holdfast_tests"]
+
+[[stages]]
+name = "e2e"
+description = "Real-bwrap smoke test (non-root, needs unprivileged userns)"
+type = "run"
+depends = ["build"]
+commands = ["sh tests/e2e.sh ./bin/holdfast"]
+
+[[stages]]
+name = "check"
+description = "Build and run the unit tests"
+type = "group"
+depends = ["build", "test"]
+
+[[stages]]
+name = "clean"
+description = "Remove all build artifacts"
+type = "clean"
+targets = ["build"]
+paths = ["root://bin", "root://obj"]
+
+[install]
+depends = ["build"]
+dir = "/usr/local"
+symlink = false
+artifacts = [
+  { source = "root://bin/holdfast", dest = "bin/holdfast", chmod = 755 },
+  { source = "root://profiles", dest = "share/holdfast/profiles" },
+  { source = "root://docs", dest = "share/doc/holdfast" },
+]

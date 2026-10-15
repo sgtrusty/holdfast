@@ -1,0 +1,7 @@
+# premake5 / predep build output
+bin/
+obj/
+Makefile
+*.make
+
+.cache/

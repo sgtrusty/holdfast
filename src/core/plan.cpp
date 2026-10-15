@@ -1,0 +1,326 @@
+#include "core/plan.hpp"
+
+#include <algorithm>
+#include <set>
+
+#include "util/log.hpp"
+#include "util/sys.hpp"
+
+namespace hf {
+
+// ---------------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------------
+
+std::vector<fs::path> find_git_entries(const fs::path& root, size_t cap) {
+    std::vector<fs::path> out;
+    std::error_code ec;
+    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+    while (!ec && it != end) {
+        const fs::directory_entry& e = *it;
+        std::error_code e2;
+        if (e.path().filename() == ".git") {
+            out.push_back(e.path());
+            if (e.is_directory(e2) && !e.is_symlink(e2)) it.disable_recursion_pending();
+            if (out.size() >= cap) break;
+        }
+        it.increment(ec);
+    }
+    return out;
+}
+
+Strings match_font_files(const fs::path& root, const Strings& families, size_t cap) {
+    static const std::set<std::string> exts = {".ttf", ".otf", ".ttc", ".woff", ".woff2", ".pcf", ".gz"};
+    Strings out;
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) return out;
+    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+    while (!ec && it != end) {
+        std::error_code e2;
+        if (it->is_regular_file(e2) && exts.count(lower(it->path().extension().string()))) {
+            std::string lp = lower(it->path().string());
+            for (auto& f : families) {
+                if (lp.find(lower(f)) != std::string::npos) { out.push_back(it->path().string()); break; }
+            }
+            if (out.size() >= cap) break;
+        }
+        it.increment(ec);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+void write_xauth(const fs::path& file, const std::string& num, const std::string& cookie) {
+    auto be16 = [](std::string& s, uint16_t v) { s.push_back(char(v >> 8)); s.push_back(char(v & 0xff)); };
+    static const std::string name = "MIT-MAGIC-COOKIE-1";
+    std::string d;
+    be16(d, 0xffff);                       // FamilyWild
+    be16(d, 0);                            // empty address
+    be16(d, static_cast<uint16_t>(num.size())); d += num;
+    be16(d, static_cast<uint16_t>(name.size())); d += name;
+    be16(d, static_cast<uint16_t>(cookie.size())); d += cookie;
+    write_file(file, d, 0600);
+}
+
+namespace {
+
+const char* kXdgSub[] = {".config", ".cache", ".local/share", ".local/state", ".local/bin"};
+
+void mount_identity(ArgBuilder& b, const Profile& p, const PlanCtx& c) {
+    const std::string U = p.fake_user;
+    const std::string uid = std::to_string(c.user.uid), gid = std::to_string(c.user.gid);
+    write_file(c.session / "passwd",
+               "root:x:0:0:root:/root:/bin/sh\n" + U + ":x:" + uid + ":" + gid + ":" + U + ":/home/" + U + ":/bin/sh\n"
+               "nobody:x:65534:65534:nobody:/:/sbin/nologin\n", 0644);
+    write_file(c.session / "group", "root:x:0:\n" + U + ":x:" + gid + ":\nnogroup:x:65534:\n", 0644);
+    write_file(c.session / "nsswitch.conf", "passwd: files\ngroup: files\nshadow: files\nhosts: files dns\n", 0644);
+    write_file(c.session / "hosts", "127.0.0.1 localhost " + p.hostname + "\n::1 localhost\n", 0644);
+    b.ro_bind(c.session / "passwd", "/etc/passwd");
+    b.ro_bind(c.session / "group", "/etc/group");
+    b.ro_bind(c.session / "nsswitch.conf", "/etc/nsswitch.conf");
+    b.ro_bind(c.session / "hosts", "/etc/hosts");
+}
+
+void mount_host_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, const VarCtx& vc) {
+    b.dir("/usr/bin");
+    b.symlink("usr/bin", "/bin").symlink("usr/bin", "/sbin").symlink("usr/bin", "/usr/sbin");
+
+    if (p.libs) {  // shared libraries only; binaries are whitelisted one by one below
+        for (const char* d : {"/usr/lib", "/usr/lib64"})
+            if (fs::is_directory(d)) b.ro_bind(d, d);
+        for (const char* l : {"/lib", "/lib64"}) {
+            std::error_code ec;
+            if (fs::is_symlink(l, ec)) { if (fs::exists(l, ec)) b.symlink(fs::read_symlink(l).string(), l); }
+            else if (fs::is_directory(l, ec)) b.ro_bind_try(l, l);
+        }
+    }
+
+    std::set<std::string> seen;
+    for (const std::string& tok : p.bins) {
+        std::string name = tok;
+        std::optional<fs::path> host;
+        if (auto eq = tok.find('='); eq != std::string::npos) {
+            name = tok.substr(0, eq);
+            host = fs::path(expand(tok.substr(eq + 1), vc));
+            if (!fs::exists(*host)) host.reset();
+        } else {
+            host = which(name);
+        }
+        if (name.empty() || name.find('/') != std::string::npos) throw ProfileError("[bin] invalid name: " + tok);
+        if (!seen.insert(name).second) continue;
+        if (!host) { log::warn("allowed binary not found on host, skipped: " + name); continue; }
+        std::error_code ec;
+        fs::path real = fs::canonical(*host, ec);
+        if (ec) { log::warn("cannot resolve " + host->string()); continue; }
+        try { c.policy->check_bind(real, false); }
+        catch (const PolicyError& e) { log::warn(std::string("binary skipped: ") + e.what()); continue; }
+        b.ro_bind(real, fs::path("/usr/bin") / name);
+        // Multi-call/alternatives targets sometimes locate resources relative to their real path.
+        if (real != *host && !path_under(real, c.user.home) && real != fs::path("/usr/bin") / name)
+            b.ro_bind_try(real, real);
+    }
+
+    if (p.fs_defaults) {
+        for (const char* d : {"/etc/ld.so.cache", "/usr/share/terminfo", "/usr/share/zoneinfo", "/etc/ssl",
+                              "/etc/ca-certificates", "/etc/os-release", "/usr/lib/os-release"})
+            if (fs::exists(d)) b.ro_bind_try(d, d);
+        if (c.network && fs::exists("/etc/resolv.conf")) b.ro_bind("/etc/resolv.conf", "/etc/resolv.conf");
+    }
+}
+
+void mount_bundle_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, std::set<std::string>& etc_skip) {
+    const fs::path R = c.paths.rootfs;
+    if (!fs::is_directory(R / "usr"))
+        throw Error(cat("bundle for profile '", p.name, "' is not installed; run: holdfast bundle setup ", p.name));
+    for (const char* t : {"bin", "sbin", "lib", "lib64", "usr"}) {
+        fs::path s = R / t;
+        std::error_code ec;
+        if (fs::is_symlink(s, ec)) b.symlink(fs::read_symlink(s).string(), fs::path("/") / t);
+        else if (fs::is_directory(s, ec)) b.ro_bind(s, fs::path("/") / t);
+    }
+    // /etc is rebuilt on a tmpfs: bundle files minus anything identity/network related.
+    static const std::set<std::string> skip = {"passwd", "group", "shadow", "gshadow", "nsswitch.conf", "resolv.conf",
+                                               "hosts", "hostname", "machine-id", "mtab", "passwd-", "group-", "shadow-"};
+    etc_skip.insert(skip.begin(), skip.end());
+    b.tmpfs("/etc");
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(R / "etc", ec)) {
+        std::string n = e.path().filename().string();
+        if (etc_skip.count(n)) continue;
+        if (e.is_symlink()) b.symlink(fs::read_symlink(e.path()).string(), fs::path("/etc") / n);
+        else b.ro_bind(e.path(), fs::path("/etc") / n);
+    }
+    if (c.network) {
+        // resolv.conf from host (or from the ip-netns overlay when running under ivpn).
+        if (fs::exists("/etc/resolv.conf")) b.ro_bind("/etc/resolv.conf", "/etc/resolv.conf");
+    }
+}
+
+void mount_fonts(ArgBuilder& b, const Profile& p, const PlanCtx& c, const fs::path& fonts_root) {
+    Strings files = match_font_files(fonts_root, p.font_families);
+    if (files.empty()) throw Error(cat("[fonts] no font files matching '", join(p.font_families, ","), "' under ", fonts_root.string()));
+    b.tmpfs("/usr/share/fonts");
+    for (auto& f : files) {
+        fs::path rel = fs::relative(f, fonts_root);
+        b.ro_bind(canon(f), fs::path("/usr/share/fonts") / rel);
+    }
+    std::string conf = "<?xml version=\"1.0\"?>\n<!DOCTYPE fontconfig SYSTEM \"fonts.dtd\">\n<fontconfig>\n"
+                       "  <dir>/usr/share/fonts</dir>\n  <cachedir>/tmp/fontcache</cachedir>\n";
+    const std::string first = lower(p.font_families.front());
+    auto alias = [&](const char* generic, const char* fam) {
+        conf += cat("  <alias><family>", generic, "</family><prefer><family>", fam, "</family></prefer></alias>\n");
+    };
+    if (first.find("liberation") != std::string::npos) { alias("sans-serif", "Liberation Sans"); alias("serif", "Liberation Serif"); alias("monospace", "Liberation Mono"); }
+    else { alias("sans-serif", "DejaVu Sans"); alias("serif", "DejaVu Serif"); alias("monospace", "DejaVu Sans Mono"); }
+    conf += "</fontconfig>\n";
+    write_file(c.session / "fonts.conf", conf, 0644);
+    b.ro_bind(c.session / "fonts.conf", "/etc/fonts/fonts.conf");
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------------
+// the plan
+// ---------------------------------------------------------------------------------
+
+Plan build_plan(const Profile& p, const PlanCtx& c) {
+    if (!c.policy) throw Error("internal: policy missing");
+    Plan plan;
+    ArgBuilder& b = plan.b;
+    VarCtx vc;
+    vc.user = &c.user; vc.paths = &c.paths; vc.cwd = c.cwd;
+    const std::string U = p.fake_user;
+    const fs::path fhome = fs::path("/home") / U;
+    const std::string uid = std::to_string(c.user.uid);
+
+    // -- isolation core ---------------------------------------------------------
+    b.flag("--unshare-all").flag("--unshare-user").flag("--unshare-ipc").flag("--unshare-pid")
+     .flag("--unshare-uts").flag("--unshare-cgroup");
+    if (c.network) b.flag("--share-net");          // else --unshare-all already isolates it
+    b.flag("--die-with-parent");
+    if (p.new_session) b.flag("--new-session");     // blocks TIOCSTI keystroke injection
+    b.raw({"--cap-drop", "ALL"});
+    if (p.disable_userns && c.userns_disable_supported) b.flag("--disable-userns");
+    b.raw({"--hostname", p.hostname});
+    b.raw({"--proc", "/proc"}).raw({"--dev", "/dev"});
+    b.tmpfs("/tmp").tmpfs("/run").dir(fs::path("/run/user") / uid).dir("/var/tmp");
+    b.raw({"--chmod", "0700", (fs::path("/run/user") / uid).string()});
+
+    // -- userland ---------------------------------------------------------------
+    std::set<std::string> etc_skip;
+    fs::path fonts_root;
+    if (p.root == RootMode::Host) {
+        mount_host_rootfs(b, p, c, vc);
+        fonts_root = "/usr/share/fonts";
+    } else {
+        mount_bundle_rootfs(b, p, c, etc_skip);
+        fonts_root = c.paths.rootfs / "usr/share/fonts";
+    }
+    mount_identity(b, p, c);
+    if (c.display && !p.font_families.empty()) mount_fonts(b, p, c, fonts_root);
+
+    for (const auto& t : p.tmpfs) b.tmpfs(expand(t, vc));
+
+    // -- persistent fake $HOME --------------------------------------------------
+    make_private_dir(c.paths.home);
+    for (auto s : kXdgSub) make_private_dir(c.paths.home / s);
+    for (auto& d : p.home_dirs) make_private_dir(c.paths.home / d);
+    b.bind(c.paths.home, fhome);
+
+    for (const auto& m : p.home_binds) {
+        fs::path src = c.user.home / expand(m.src, vc);
+        if (!fs::exists(src)) {
+            if (m.optional) continue;
+            throw Error("[home] bind source does not exist: " + src.string());
+        }
+        fs::path dst = fhome / (m.dst.empty() ? expand(m.src, vc) : expand(m.dst, vc));
+        c.policy->check_bind(src, m.rw);
+        if (m.rw) b.bind(canon(src), dst); else b.ro_bind(canon(src), dst);
+    }
+
+    // -- user-declared mounts (whitelist) --------------------------------------
+    for (const auto& m : p.mounts) {
+        Strings srcs = expand_glob(m.src, vc);
+        if (srcs.size() > 1 && !m.dst.empty()) throw ProfileError("glob with explicit destination is ambiguous: " + m.src);
+        bool any = false;
+        for (const auto& s : srcs) {
+            if (!fs::exists(s)) continue;
+            any = true;
+            fs::path dst = m.dst.empty() ? fs::path(s) : fs::path(expand(m.dst, vc));
+            c.policy->check_bind(s, m.rw);
+            if (m.rw) b.bind(canon(s), dst); else b.ro_bind(canon(s), dst);
+        }
+        if (!any && !m.optional) throw Error("[fs] source does not exist: " + m.src);
+    }
+
+    // -- working tree + .git guard ---------------------------------------------
+    if (c.mount_cwd) {
+        c.policy->check_cwd(c.cwd);
+        b.bind(c.cwd, p.cwd_dest);
+        if (p.git_protect) {
+            size_t n = 0;
+            for (const auto& g : find_git_entries(c.cwd)) {
+                // `--ro-bind` over a bind: the mountpoint cannot be renamed/unlinked from inside.
+                b.ro_bind(g, fs::path(p.cwd_dest) / fs::relative(g, c.cwd));
+                ++n;
+            }
+            log::info(cat("working tree mounted at ", p.cwd_dest, " (", n, " .git entr", n == 1 ? "y" : "ies", " read-only)"));
+        }
+    }
+
+    // -- display / audio / clipboard -------------------------------------------
+    if (c.display) {
+        b.bind(c.display->socket, c.display->socket);
+        b.setenv("DISPLAY", c.display->display);
+        if (!c.display->authfile.empty()) {
+            b.ro_bind(c.display->authfile, "/tmp/.Xauthority");
+            b.setenv("XAUTHORITY", "/tmp/.Xauthority");
+        }
+    }
+    if (p.audio) {
+        fs::path sock = c.user.runtime_dir / "pulse/native";
+        if (fs::exists(sock)) {
+            fs::path in_box = fs::path("/run/user") / uid / "pulse/native";
+            b.ro_bind(sock, in_box);
+            b.setenv("PULSE_SERVER", "unix:" + in_box.string());
+            log::warn("audio=pulse also grants MICROPHONE access to every process in the sandbox "
+                      "(the browser's permission prompt does not protect you from a compromised process).");
+        } else {
+            log::warn("audio=pulse requested but " + sock.string() + " does not exist");
+        }
+    }
+    if (p.clipboard_out) {
+        write_file(c.session / "clip", "", 0600);
+        b.bind(c.session / "clip", p.clipboard_path);
+    }
+
+    // -- environment ------------------------------------------------------------
+    b.flag("--clearenv");
+    b.setenv("HOME", fhome.string()).setenv("USER", U).setenv("LOGNAME", U).setenv("SHELL", "/bin/sh");
+    b.setenv("XDG_RUNTIME_DIR", (fs::path("/run/user") / uid).string());
+    if (p.root == RootMode::Host) b.setenv("PATH", "/usr/bin:" + (fhome / ".local/bin").string());
+    else b.setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:" + (fhome / ".local/bin").string() + ":" +
+                          (fhome / ".cargo/bin").string() + ":" + (fhome / "go/bin").string());
+    Strings pass = {"TERM", "LANG", "COLORTERM"};
+    pass.insert(pass.end(), p.env_pass.begin(), p.env_pass.end());
+    for (auto& k : pass) if (const char* v = std::getenv(k.c_str())) b.setenv(k, v);
+    for (auto& [k, v] : p.env_set) b.setenv(k, expand(v, vc));
+    for (auto& k : p.env_unset) b.raw({"--unsetenv", k});
+
+    // -- command ----------------------------------------------------------------
+    fs::path wd = c.mount_cwd ? fs::path(p.cwd_dest) : fhome;
+    b.chdir(wd);
+    Strings cmd = c.command_override.empty() ? p.command : c.command_override;
+    if (cmd.empty()) throw ProfileError("no command: set [profile] command or pass one after --");
+    for (auto& w : cmd) w = expand(w, vc);
+    if (!p.wm.empty()) {
+        Strings wrapped = {"/bin/sh", "-c", p.wm + " & exec \"$@\"", "holdfast"};
+        wrapped.insert(wrapped.end(), cmd.begin(), cmd.end());
+        cmd = wrapped;
+    }
+    b.command(cmd);
+    if (!p.seccomp.empty()) plan.seccomp = expand(p.seccomp, vc);
+    return plan;
+}
+
+}  // namespace hf
