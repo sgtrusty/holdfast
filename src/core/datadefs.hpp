@@ -56,10 +56,17 @@ OsDef parse_os(const std::string& text, const std::string& origin, const std::st
 // The recipe is trusted code (like any profile's shell lines): read it before you use it.
 DepRecipe parse_dep(const std::string& text, const std::string& origin, const std::string& name);
 
-std::optional<fs::path> find_data(const Strings& roots, const std::string& kind, const std::string& name);   // kind: "lib"|"os"|"dep"|"profile"
+// data/display/NAME.profile: what a display is, so a sandbox profile can just say `[display] use = NAME`.
+//   [display] description · server = xephyr|host       (xephyr = private X11 server; host = your session, Wayland if WAYLAND_DISPLAY is set, else X11)
+//             xephyr only: size = WxH · xauth = yes|no · wm = <shell snippet>   (Wayland has no wm/server split and no cookie)
+// Keys that do not apply are errors. Consent for mode = host stays in the SANDBOX profile (`allow_host = yes`).
+DisplayDef parse_display(const std::string& text, const std::string& origin, const std::string& name);
+
+std::optional<fs::path> find_data(const Strings& roots, const std::string& kind, const std::string& name);   // kind: "lib"|"os"|"dep"|"display"|"profile"
 LibDef load_lib(const std::string& name, const Strings& roots);
 OsDef load_os(const std::string& name, const Strings& roots);
 DepRecipe load_dep(const std::string& name, const Strings& roots);
+DisplayDef load_display(const std::string& name, const Strings& roots);
 Strings list_data(const Strings& roots, const std::string& kind);   // names, first root wins, sorted
 
 HostId read_host_id(const fs::path& os_release = "/etc/os-release");
@@ -67,7 +74,7 @@ std::string suggest_os_name(const HostId& h);                       // "debian-1
 std::optional<OsDef> match_host_os(const Strings& roots, const HostId& h);   // most specific kind=host definition for h
 std::string render_os(const OsDef& o);                               // canonical text of a kind=host file
 
-// Fills what profiles reference by name: bundle profiles get alpine_*/apk_packages/bundle_id from their OS
+// Fills what profiles reference by name: every profile gets its `display` from data/display; bundle profiles get alpine_*/apk_packages/bundle_id from their OS
 // file and their data/dep recipes; host profiles with `libs = minimal` get lib_binds from the lib closure of
 // [libs] use and the OS file list. [deps] use on a host profile is an error (nothing writable to install into).
 // Fails closed: unknown names, uncovered [bin] commands and missing locks are errors that say what to run.

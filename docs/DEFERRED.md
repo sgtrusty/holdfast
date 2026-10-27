@@ -52,6 +52,10 @@ checks (resize, Ctrl-C, mouse, exit) with `lazyvim` and `lazygit-dev`. Specific 
   answered, WireGuard discarded the answers); with a fresh config the tunnel came up and the browser started. holdfast now says
   "config probably wrong or stale" and keeps the packet counters and kernel view behind `-v`. The sudo/pty fix and the DISPLAY fix
   that followed have not been re-run end to end.
+- **Wayland is host-socket only.** `server = host` connects the sandbox to your real compositor when `WAYLAND_DISPLAY` is set (with consent). Still open: a nested
+  private compositor (cage/weston/sway, a new `server =` value, the Xephyr equivalent), the `wp_security_context_v1` protocol so a compositor can mark the sandbox as
+  restricted, and GPU access (`/dev/dri`, so software rendering is all a Wayland client gets today). The Wayland backend has not been run
+  against a real compositor yet; the X11 one was only moved, not changed.
 - **`net=host`** shares the host network namespace, including abstract unix sockets (X11, some D-Bus), whatever
   `display = none` says. Prefer `net=pasta`. pasta (and host) still reach the LAN.
 - **Whitelisted binaries are a PATH allowlist, not an exec allowlist.** With `libs = full`, anything executable under

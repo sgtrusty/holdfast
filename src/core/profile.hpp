@@ -10,7 +10,8 @@ enum class RootMode { Host, Bundle };
 enum class NetMode { None, Host, Pasta, Ivpn };
 enum class LibsMode { Minimal, Full };
 enum class TermMode { Filter, Passthrough };
-enum class DisplayMode { None, Host, Xephyr };
+enum class DisplayProtocol { X11, Wayland };       // which display protocol the sandboxed program speaks
+enum class DisplayMode { Host, Nested };           // the host's display server (explicit opt-in) | a private one (X11: Xephyr)
 enum class CwdMode { None, Ask, Yes };
 
 struct MountSpec {
@@ -29,6 +30,18 @@ struct DepRecipe {
     Strings needs;                 // commands that must already exist in the userland (its packages come from data/os)
     Strings run;                   // shell lines, run once with the profile's identity and $HOME
     std::string digest;            // hash of os+net+needs+run: a changed recipe is detected, never silently re-run
+};
+
+// data/display/NAME.profile: what a display IS. A sandbox profile only says `[display] use = NAME`; X11 specifics (Xephyr, its
+// size and cookie, the window manager) and Wayland specifics live here, so the sandbox profile does not care which protocol it gets.
+struct DisplayDef {
+    std::string name, description;
+    DisplayProtocol protocol = DisplayProtocol::X11;
+    DisplayMode mode = DisplayMode::Nested;
+    // x11 + nested only (the parser rejects them elsewhere): Wayland has no server/window-manager split and no cookie file.
+    std::string size = "1280x800";
+    bool xauth = true;
+    std::string wm;                // shell snippet started in the sandbox before the program; X needs a separate window manager
 };
 
 struct Profile {
@@ -73,11 +86,9 @@ struct Profile {
     int subnet_octet = 0;          // 0 => derived from ns name
 
     // [display]
-    DisplayMode display = DisplayMode::None;
-    std::string display_size = "1280x800";
-    std::string wm;                // shell snippet started before the command
-    bool allow_host_x11 = false;
-    bool xauth = true;
+    std::string display_use;       // [display] use = NAME: a data/display profile; empty = no display
+    bool allow_host_display = false;   // [display] allow_host: consent when that display is mode = host (it hands over your real session)
+    std::optional<DisplayDef> display;   // NOT parsed: resolve_profile_data() fills it from display_use
 
     // [audio] [clipboard] [git] [fonts]
     bool audio = false;

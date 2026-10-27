@@ -41,6 +41,8 @@ The build is described in `premake5.lua`; `predep.toml` declares the `build`/`te
 | New bwrap flag | `ArgBuilder` (+ `pretty()` arity list) → `plan.cpp` → invariant test in `test_main.cpp` |
 | Firewall/netns change | `net/netns.cpp`; extend `NetNs::selftest`; re-run the stub lifecycle (below) |
 | New command or CLI option | help text and `parse_args` in `src/cli/args.cpp` (keep the help columns aligned) → dispatch in `src/main.cpp` → case in the `cli: option parsing` test |
+| New display (a profile for an existing server) | `data/display/NAME.profile`; no C++ change |
+| New display server or protocol (a Wayland compositor mode, ...) | a new `server =` value in `parse_display` → a file in `src/protocol/display/` that fills a `Setup` (binds, env, optional background command) → one line in `display::open()` and a check in `display::validate()` → `docs/DATA.md` `data/display` → test in `display: ...` |
 | New helper binary | add to `doctor()`; check with `which()` and give an actionable error |
 | New tool a minimal-libs profile can use | `data/lib/NAME.profile` (commands, sonames, paths, needs) → `holdfast libs --refresh` on each supported OS → commit the changed `data/os/*.profile`. No C++ change. |
 | New install step for a bundle profile (a tool built/fetched into its `$HOME`) | `data/dep/NAME.profile` (`needs` + `run` lines; install into `$HOME`) → list it under the profile's `[deps] use`. No C++ change. |

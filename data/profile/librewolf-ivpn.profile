@@ -61,9 +61,7 @@ wg_conf   = $HOME/.config/holdfast/ivpn.conf
 verify    = yes
 
 [display]
-mode = xephyr
-size = 1920x1280
-wm   = i3
+use = x11-xephyr-i3        # data/display/: a private Xephyr window with the i3 window manager
 
 [fonts]
 # Only these families are visible (reduces font fingerprinting).

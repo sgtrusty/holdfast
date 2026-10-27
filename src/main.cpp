@@ -31,7 +31,7 @@ static int cmd_list(const Strings& a, bool verbose) {
     std::string home;
     try { home = resolve_user().home.string(); } catch (...) {}
     const Strings roots = data_roots(home);
-    if (a.size() > 1 || (!a.empty() && a[0] != "libs" && a[0] != "os" && a[0] != "deps")) throw Error("usage: holdfast list [libs|os|deps] [-v]");
+    if (a.size() > 1 || (!a.empty() && a[0] != "libs" && a[0] != "os" && a[0] != "deps" && a[0] != "displays")) throw Error("usage: holdfast list [libs|os|deps|displays] [-v]");
     // Piped output stays plain, headerless and one entry per line; on a terminal there is a header and colour.
     const Style st = style_for(stdout);
     bool header_done = false;
@@ -47,10 +47,11 @@ static int cmd_list(const Strings& a, bool verbose) {
     };
     if (!a.empty()) {
         const std::string which = a[0];
-        for (const auto& n : list_data(roots, which == "libs" ? "lib" : which == "deps" ? "dep" : "os")) {
+        for (const auto& n : list_data(roots, which == "libs" ? "lib" : which == "deps" ? "dep" : which == "displays" ? "display" : "os")) {
             try {
                 if (which == "libs") { LibDef d = load_lib(n, roots); line(n, "lib", d.description, d.file); }
                 else if (which == "deps") { DepRecipe d = load_dep(n, roots); line(n, "dep", d.description, find_data(roots, "dep", n).value_or("")); }
+                else if (which == "displays") { DisplayDef d = load_display(n, roots); line(n, d.mode == DisplayMode::Nested ? "xephyr" : "host", d.description, find_data(roots, "display", n).value_or("")); }
                 else { OsDef o = load_os(n, roots); line(n, o.kind == OsKind::Host ? "host" : "bundle", o.description, o.file); }
             } catch (const Error& ex) { line(n, "INVALID", ex.what(), ""); }
         }

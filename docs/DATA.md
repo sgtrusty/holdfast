@@ -1,4 +1,4 @@
-# Data files: `data/profile`, `data/lib`, `data/os`, `data/dep`
+# Data files: `data/profile`, `data/lib`, `data/os`, `data/dep`, `data/display`
 
 Profiles say **what** a sandbox needs. Three other kinds of file say **where** it lives, **what an OS setup is** and **how
 an extra tool gets installed**, so that nothing host-specific is copied into profiles and nothing is declared twice.
@@ -9,6 +9,7 @@ data/
   lib/NAME.profile       what one tool/library family needs (hand-written, distro-neutral)
   os/NAME.profile        one OS setup: a bundle's pinned Alpine + packages, or a host distro's resolved library files
   dep/NAME.profile       one install step for a bundle profile (build or fetch a tool into its $HOME)
+  display/NAME.profile   one kind of display: a private Xephyr (+ window manager) or your real session
 ```
 
 Every file is a `.profile` in the same INI-style syntax (TOML is a roadmap item; the files will be converted, not
@@ -139,6 +140,24 @@ What happens, per dep:
 the whole userland, so that sandbox is deliberately different: the rootfs is writable, `--uid 0` makes it userns-root (your
 uid mapped to 0, no real privilege), and the network is pasta's. holdfast says so when it runs; it lives in
 `install_os_packages()` in `src/core/bundle.cpp`.
+
+## `data/display/NAME.profile`
+
+A sandbox profile says `[display] use = NAME`; this file says what that display is.
+
+```ini
+[display]
+description = private X11 server (Xephyr) with the i3 window manager
+server = xephyr          # xephyr | host   (required)
+size   = 1920x1280       # xephyr only, default 1280x800
+xauth  = yes             # xephyr only, default yes: private cookie file
+wm     = i3              # xephyr only: shell snippet started in the sandbox; needs `sh` in [bin] allow on host-root profiles
+```
+
+- `server = xephyr` is a private X11 server. X needs a separate window manager, hence `wm`.
+- `server = host` is your real session: Wayland when `WAYLAND_DISPLAY` is set, otherwise X11. It takes no other keys (Wayland
+  needs no window manager, cookie or size). The sandbox profile must also say `[display] allow_host = yes`; consent is never in the shared file.
+- Keys that do not apply are errors. Shipped: `x11-xephyr`, `x11-xephyr-i3`, `host`. `holdfast list displays` shows what is visible.
 
 ## How a minimal profile resolves (run time, no ELF parsing)
 

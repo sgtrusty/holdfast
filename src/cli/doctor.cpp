@@ -21,7 +21,7 @@ const std::vector<FeatureSpec>& feature_specs() {
         {"net = pasta",       {"pasta"}},
         {"bundle profiles",   {"pasta", "curl", "tar", "gzip", "sha256sum"}},
         {"net = ivpn",        {"ip", "iptables", "wg-quick", "wg", "ping", "sudo", "setpriv", "setsid", "?ip6tables"}},
-        {"display = xephyr",  {"Xephyr"}},
+        {"display = x11 nested",  {"Xephyr"}},
         {"clipboard = out",   {"xclip|wl-copy"}},
     };
     return v;

@@ -38,8 +38,16 @@ where it came from; to customise one, copy its file into `~/.config/holdfast/pro
 
 ## Display
 
-`none`; `xephyr` (a private nested X server with a random cookie; only its socket enters the sandbox); or `host`
-(requires `allow_host_x11 = yes`, because it hands over your keyboard and screen).
+A profile only names one: `[display] use = x11-xephyr-i3`. The file in `data/display/` says what it is, with one choice, `server`:
+
+| `server` | what happens |
+|---|---|
+| `xephyr` | X11. A private X server (Xephyr) with a random cookie; only its socket enters the sandbox. X needs a separate window manager, so the file can set `wm` (e.g. `i3`), plus `size` and `xauth` |
+| `host` | your real session: the Wayland compositor socket if `WAYLAND_DISPLAY` is set, otherwise your X server. Nothing else to configure (Wayland has no window-manager/server split). The sandbox profile must say `allow_host = yes`, because it hands over your screen and input |
+
+Each protocol is a backend in `src/protocol/display/` that turns the choice into plain data (files to bind, environment variables,
+an optional background command), so the rest of holdfast does not know which protocol is in use. A private Wayland compositor
+(cage, weston) would be a new `server` value; it is not implemented yet.
 
 ## Working tree
 

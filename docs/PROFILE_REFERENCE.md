@@ -75,8 +75,13 @@ Not covered: what the program *draws* (it can still print misleading text), and 
 Input is relayed byte for byte. If the terminal ever stays raw after a hard kill of holdfast itself, run `reset`.
 
 ## [display]
-`mode = none|xephyr|host` · `size = WxH` · `wm = <shell snippet started in background before the command>` ·
-`xauth = yes|no` (xephyr cookie) · `allow_host_x11 = yes` (required for `mode=host`).
+| key | default | |
+|---|---|---|
+| use | | name of a display file in `data/display/` (`holdfast list displays`). Leave it out for no display at all |
+| allow_host | `no` | consent when that display is `server = host`: the sandbox then shares your real session (X11: it can see and drive all your windows; Wayland: it becomes a client of your compositor, which may offer it privileged extensions). Consent lives here, not in the shared display file. An error with a nested display or no display |
+
+What the display *is* (server, window size, window manager, cookie) is described once in `data/display/NAME.profile`, see `docs/DATA.md`.
+The old `protocol`, `mode`, `size`, `wm`, `xauth`, `allow_host_x11` and `allow_host_wayland` keys are errors here, with a message that says so.
 
 ## [audio]  `mode = none|pulse` – pulse also grants microphone access.
 ## [clipboard]  `mode = none|out` · `path` (in-sandbox file, default `/tmp/clip_pipe`) · `sanitize = yes|no` (default `yes`: strip control characters, incl. ESC/CR/DEL/C1 and bidi overrides; `\n` and `\t` are kept).

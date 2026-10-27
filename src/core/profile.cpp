@@ -140,17 +140,14 @@ Profile parse_profile(const std::string& text, const std::string& o) {
             }
             else bad(l, o, "unknown key");
         } else if (s == "display") {
-            if (k == "mode") {
-                std::string x = lower(v);
-                if (x == "none") p.display = DisplayMode::None;
-                else if (x == "host") p.display = DisplayMode::Host;
-                else if (x == "xephyr") p.display = DisplayMode::Xephyr;
-                else bad(l, o, "expected none|host|xephyr");
+            if (k == "use") {
+                if (!valid_data_name(v)) bad(l, o, "expected a display profile name (data/display/NAME.profile)");
+                p.display_use = v;
             }
-            else if (k == "size") p.display_size = v;
-            else if (k == "wm") p.wm = v;
-            else if (k == "allow_host_x11") p.allow_host_x11 = as_bool(l, o);
-            else if (k == "xauth") p.xauth = as_bool(l, o);
+            else if (k == "allow_host") p.allow_host_display = as_bool(l, o);
+            else if (k == "protocol" || k == "mode" || k == "size" || k == "wm" || k == "xauth" || k == "allow_host_x11" || k == "allow_host_wayland")
+                bad(l, o, "moved out of profiles: describe the display once in data/display/NAME.profile (protocol, mode, size, wm, xauth) "
+                          "and write `use = NAME` here; host access is now `allow_host = yes`");
             else bad(l, o, "unknown key");
         } else if (s == "audio") {
             if (k == "mode") {

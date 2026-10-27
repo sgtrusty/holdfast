@@ -30,7 +30,8 @@ src/
   core/bundle.{hpp,cpp}   Alpine fetch/verify/extract, provisioning stage, stamp, purge
   core/session.{hpp,cpp}  run_profile orchestration, validate_profile, net_test, doctor
   net/netns.{hpp,cpp}     WireGuard config parsing/sanitising, NetNs lifecycle, kill switch, self-test
-  ui/display.{hpp,cpp}    XephyrServer, host X11, ClipboardBridge
+  protocol/display/       display.{hpp,cpp} (Setup/Backend/open/validate), x11.{hpp,cpp} (Xephyr, host X11, xauth), wayland.{hpp,cpp} (host socket)
+  ui/clipboard.{hpp,cpp}  ClipboardBridge, sanitize_clipboard  (ui/termfilter.*: terminal escape filter)
 tests/test_main.cpp       83 dependency-free unit checks      tests/e2e.sh  real-bwrap smoke test
 profiles/*.profile        example profiles                    docs/                this documentation
 ```
@@ -64,12 +65,12 @@ is a `ProfileError`. Inline comments: whitespace + `#`.
 3. Bundle mode: require installed bundle; warn when the provision stamp no longer matches the profile.
 4. Working tree: choose cwd; `Policy::check_cwd` (throws → exit 3); confirm on `/dev/tty` for `cwd=ask` (no tty ⇒ not mounted).
 5. Create the per-run **session dir** `<XDG_RUNTIME_DIR>/holdfast/<name>.<pid>` (0700; fallback `/tmp/holdfast-UID`).
-6. Start network (`NetNs::up`) → display (`XephyrServer::start` / `host_x11`) in that order.
+6. Start network (`NetNs::up`) → display (`display::open`: Xephyr, host X11 or the host Wayland socket) in that order.
 7. `build_plan` (§6) – writes session files, returns the argv.
 8. Start `ClipboardBridge` if configured.
 9. `launcher_argv` writes `bwrap.args` (NUL-separated, 0600) and returns the trampoline argv; wrap with `NetNs::wrap` (`[sudo] ip netns exec NS setpriv --reuid … --`) or `as_user` (setpriv when root).
 10. `run_with_signals`: SIGTERM/SIGHUP forwarded to the child chain; SIGINT swallowed (tty already delivered it to the process group).
-11. Teardown by RAII in reverse order: clipboard → Xephyr (TERM, then KILL) → netns (rules, namespace, veth, `/etc/netns/NS`, `ip_forward`, sudo keepalive) → session dir.
+11. Teardown by RAII in reverse order: clipboard → display backend (Xephyr: TERM, then KILL) → netns (rules, namespace, veth, `/etc/netns/NS`, `ip_forward`, sudo keepalive) → session dir.
 
 `--dry-run` executes 1-7 with *no* network/display side effects (placeholder display `:90`) and prints
 `ArgBuilder::pretty()`.
@@ -145,7 +146,7 @@ dns → wg-quick up → wg-iface rules → verify`. Any exception → `down()` (
 ## 10. Display, clipboard, audio
 
 - **Xephyr**: first free display ≥ 90 (checks socket + lock), retry on early death; 16 random bytes cookie written as an X authority file with `FamilyWild` (matches regardless of the sandbox's different hostname), passed via `-auth`, bound at `/tmp/.Xauthority` with `XAUTHORITY`; `-nolisten tcp -terminate`, window title marks it untrusted. Abstract-socket access is per-netns, and the cookie is enforced either way.
-- **Host X11**: only with `allow_host_x11 = yes`; shares the real socket (+ your `XAUTHORITY`); warned loudly.
+- **Host X11**: only with `allow_host = yes` on a `server = host` display; shares the real socket (+ your `XAUTHORITY`); warned loudly.
 - **Clipboard**: inotify `IN_CLOSE_WRITE` on a session file bound into the sandbox; content ≤ 1 MiB is piped to `xclip -selection clipboard` / `wl-copy` as the user, then the file is truncated. One direction only.
 - **Audio**: binds only `$XDG_RUNTIME_DIR/pulse/native` read-only and sets `PULSE_SERVER`; logs the microphone warning.
 

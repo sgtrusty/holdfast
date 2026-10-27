@@ -14,7 +14,9 @@
 #include "core/launch.hpp"
 #include "core/seccomp.hpp"
 #include "core/bundle.hpp"
-#include "ui/display.hpp"
+#include "protocol/display/display.hpp"
+#include "protocol/display/x11.hpp"
+#include "ui/clipboard.hpp"
 #include "ui/termfilter.hpp"
 #include "net/netns.hpp"
 #include "util/sys.hpp"
@@ -417,12 +419,12 @@ int main() {
         CHECK(q.deps[0].os == "alpine-x" && q.deps[0].net == NetMode::None);              // taken from the recipe, not assumed
         {   // a dep is the using profile with ONLY the documented overrides: identity, seccomp, terminal, os, home stay the profile's
             Profile busy = q;
-            busy.net = NetMode::Ivpn; busy.cwd = CwdMode::Yes; busy.display = DisplayMode::Xephyr; busy.wm = "i3"; busy.audio = true;
+            busy.net = NetMode::Ivpn; busy.cwd = CwdMode::Yes; busy.display = parse_display("[display]\nserver = xephyr\nwm = i3\n", "o", "d"); busy.display_use = "d"; busy.allow_host_display = true; busy.audio = true;
             busy.clipboard_out = true; busy.seccomp = "none"; busy.terminal = TermMode::Passthrough; busy.dep_use = {"hello"};
             DepRecipe pasta = q.deps[0];
             pasta.net = NetMode::Pasta;
             Profile dp = dep_profile(busy, pasta);
-            CHECK(dp.net == NetMode::Pasta && dp.cwd == CwdMode::None && dp.display == DisplayMode::None && dp.wm.empty());
+            CHECK(dp.net == NetMode::Pasta && dp.cwd == CwdMode::None && !dp.display && dp.display_use.empty() && !dp.allow_host_display);
             CHECK(!dp.audio && !dp.clipboard_out && dp.dep_use.empty() && dp.deps.empty());
             CHECK(dp.seccomp == "none" && dp.terminal == TermMode::Passthrough);              // inherited from the profile, not forced
             CHECK(dp.name == busy.name && dp.fake_user == busy.fake_user && dp.os == busy.os && dp.bundle_id == busy.bundle_id && dp.root == RootMode::Bundle);
@@ -559,6 +561,12 @@ int main() {
         each("data/lib", [](const std::string& t, const std::string& o, const std::string& n) { parse_lib(t, o, n); });
         each("data/os", [](const std::string& t, const std::string& o, const std::string& n) { parse_os(t, o, n); });
         each("data/dep", [](const std::string& t, const std::string& o, const std::string& n) { parse_dep(t, o, n); });
+        each("data/display", [](const std::string& t, const std::string& o, const std::string& n) { parse_display(t, o, n); });
+        for (const auto& e : fs::directory_iterator("data/profile")) {                    // every `use =` names a file that ships
+            if (e.path().extension() != ".profile") continue;
+            Profile q = parse_profile(read_file(e.path()), e.path().string());
+            if (!q.display_use.empty()) CHECK(fs::exists("data/display/" + q.display_use + ".profile"));
+        }
         Profile lw = parse_profile(read_file("data/profile/librewolf-ivpn.profile"), "librewolf-ivpn");
         CHECK(lw.disable_userns);                                                         // the browser never gets nested user namespaces
     });
@@ -577,7 +585,7 @@ int main() {
         CHECK(!ivpn.ready() && std::find(ivpn.missing.begin(), ivpn.missing.end(), "wg-quick") != ivpn.missing.end());
         CHECK(std::find(ivpn.missing.begin(), ivpn.missing.end(), "ip6tables") == ivpn.missing.end());   // optional tools never block
         CHECK(std::find(ivpn.missing_optional.begin(), ivpn.missing_optional.end(), "ip6tables") != ivpn.missing_optional.end());
-        CHECK(!find(fs_, "display = xephyr").ready());
+        CHECK(!find(fs_, "display = x11 nested").ready());
         auto none = evaluate_features([](const std::string&) { return false; });
         CHECK(none.size() == fs_.size());
         FeatureStatus clip = find(none, "clipboard = out");
@@ -609,10 +617,116 @@ int main() {
         unsetenv("NO_COLOR");
     });
 
+    // A sandbox profile that uses a display file with the given [display] body; `allow` is the profile's consent line.
+    auto with_display = [](const std::string& disp, const std::string& allow = "", const std::string& bins = "sh") {
+        Profile p = parse_profile("[profile]\nname=t\ncommand=sh\n[bin]\nallow = " + bins + "\n[display]\nuse = d\n" + allow, "t");
+        p.display = parse_display("[display]\n" + disp + "\n", "d.profile", "d");
+        return p;
+    };
+
+    test("display: the sandbox profile only names a display; the display file says what it is", [&] {
+        Profile u = parse_profile("[profile]\nname=t\ncommand=sh\n[display]\nuse = x11-xephyr-i3\nallow_host = yes\n", "t");
+        CHECK(u.display_use == "x11-xephyr-i3" && u.allow_host_display && !u.display);   // filled by resolve_profile_data
+        for (const char* k : {"protocol = x11", "mode = nested", "size = 800x600", "wm = i3", "xauth = no", "allow_host_x11 = yes", "allow_host_wayland = yes"})
+            THROWS(ProfileError, parse_profile(std::string("[profile]\nname=t\ncommand=sh\n[display]\n") + k + "\n", "t"));   // moved out of profiles
+        THROWS(ProfileError, parse_profile("[profile]\nname=t\ncommand=sh\n[display]\nuse = ../x\n", "t"));
+
+        DisplayDef x = parse_display("[display]\nserver = xephyr\nsize = 800x600\nwm = i3\n", "o", "d");
+        CHECK(x.mode == DisplayMode::Nested && x.protocol == DisplayProtocol::X11 && x.size == "800x600" && x.wm == "i3" && x.xauth);
+        DisplayDef h = parse_display("[display]\nserver = host\n", "o", "d");
+        CHECK(h.mode == DisplayMode::Host);
+        THROWS(ProfileError, parse_display("[display]\n", "o", "d"));                           // server is required
+        THROWS(ProfileError, parse_display("[display]\nserver = gopher\n", "o", "d"));
+        THROWS(ProfileError, parse_display("[display]\nprotocol = x11\nserver = xephyr\n", "o", "d"));   // no separate protocol/mode any more
+        THROWS(ProfileError, parse_display("[display]\nserver = xephyr\nsize = huge\n", "o", "d"));
+        THROWS(ProfileError, parse_display("[display]\nserver = host\nwm = i3\n", "o", "d"));  // Xephyr settings on a host session
+        THROWS(ProfileError, parse_display("[display]\nserver = host\nsize = 800x600\n", "o", "d"));
+        THROWS(ProfileError, parse_display("[display]\nserver = host\nxauth = no\n", "o", "d"));
+        THROWS(ProfileError, parse_display("[display]\nserver = xephyr\nbogus = 1\n", "o", "d"));
+        THROWS(ProfileError, parse_display("[display]\nname = other\nserver = host\n", "o", "d"));  // must match the file name
+    });
+
+    test("display: validation (consent stays in the sandbox profile)", [&] {
+        display::validate(with_display("server = xephyr\nsize = 800x600\nwm = i3"));         // sh is in [bin] allow
+        THROWS(ProfileError, display::validate(with_display("server = xephyr\nwm = i3", "", "ls")));   // wm runs through `sh -c`
+        THROWS(ProfileError, display::validate(with_display("server = host")));              // your real session needs consent
+        display::validate(with_display("server = host", "allow_host = yes\n"));
+        THROWS(ProfileError, display::validate(with_display("server = xephyr", "allow_host = yes\n")));   // consent for something that is not shared
+        Profile none = parse_profile("[profile]\nname=t\ncommand=sh\n[display]\nallow_host = yes\n", "t");
+        THROWS(ProfileError, display::validate(none));                                       // no display to consent for
+        // `host` follows the session: Wayland when WAYLAND_DISPLAY is set, else X11
+        setenv("WAYLAND_DISPLAY", "wayland-test", 1);
+        CHECK(display::effective_protocol(parse_display("[display]\nserver = host\n", "o", "d")) == DisplayProtocol::Wayland);
+        CHECK(display::effective_protocol(parse_display("[display]\nserver = xephyr\n", "o", "d")) == DisplayProtocol::X11);   // always
+        unsetenv("WAYLAND_DISPLAY");
+        CHECK(display::effective_protocol(parse_display("[display]\nserver = host\n", "o", "d")) == DisplayProtocol::X11);
+    });
+
+    test("display: backends describe themselves as plain data", [&] {
+        User u = fake_user();
+        auto find_env = [](const display::Setup& s, const std::string& k) -> std::string {
+            for (const auto& [n, v] : s.env) if (n == k) return v;
+            return "<unset>";
+        };
+        Profile none = parse_profile("[profile]\nname=t\ncommand=sh\n", "t");
+        CHECK(display::open(none, u, "/tmp", true) == nullptr);
+
+        Profile nested = with_display("server = xephyr\nwm = i3");
+        auto xb = display::open(nested, u, "/tmp/sess", true);
+        const display::Setup& xs = xb->setup();
+        CHECK(xs.backend == "x11-nested" && xs.background == "i3");
+        CHECK(find_env(xs, "DISPLAY") == ":90" && find_env(xs, "XAUTHORITY") == "/tmp/.Xauthority");
+        CHECK(xs.binds.size() == 2 && xs.binds[0].rw && !xs.binds[1].rw && xs.binds[1].sandbox == "/tmp/.Xauthority");   // socket rw, cookie ro
+        Profile noauth = with_display("server = xephyr\nxauth = no");
+        CHECK(find_env(display::open(noauth, u, "/tmp/sess", true)->setup(), "XAUTHORITY") == "<unset>");
+
+        setenv("WAYLAND_DISPLAY", "wayland-test", 1);
+        setenv("XDG_RUNTIME_DIR", "/run/user/1000", 1);
+        Profile wl = with_display("server = host", "allow_host = yes\n");
+        auto wb = display::open(wl, u, "/tmp/sess", true);
+        const display::Setup& ws = wb->setup();
+        CHECK(ws.backend == "wayland-host" && ws.background.empty());                      // no window manager to start
+        CHECK(find_env(ws, "WAYLAND_DISPLAY") == "wayland-test" && find_env(ws, "DISPLAY") == "<unset>" && find_env(ws, "XAUTHORITY") == "<unset>");
+        CHECK(ws.binds.size() == 1 && ws.binds[0].host == "/run/user/1000/wayland-test" && ws.binds[0].sandbox == "/run/user/1000/wayland-test" && ws.binds[0].rw);
+        setenv("WAYLAND_DISPLAY", "../evil", 1);                                          // a name with a path component is taken as a path
+        CHECK(display::open(wl, u, "/tmp/sess", true)->setup().env[0].second == "evil");
+        setenv("WAYLAND_DISPLAY", "bad name", 1);
+        THROWS(Error, display::open(wl, u, "/tmp/sess", true));                           // spaces: refuse instead of passing it on
+        unsetenv("WAYLAND_DISPLAY");
+        unsetenv("XDG_RUNTIME_DIR");
+        Profile nohost = with_display("server = host");
+        THROWS(ProfileError, display::open(nohost, u, "/tmp/sess", true));                // open() never skips the consent check
+    });
+
+    test("plan: the display layer is protocol-neutral (Wayland gets no DISPLAY, a background command only if given)", [] {
+        char tmpl[] = "/tmp/hf-plan-wl-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        User u = fake_user(); u.home = d + "/home"; fs::create_directories(u.home);
+        u.runtime_dir = d + "/run";
+        Policy pol(u, {});
+        Profile p = parse_profile("[profile]\nname=t\ncommand=sh\n[bin]\nallow = sh\n[fs]\nlibs=full\n[home]\nuser=box\n", "t");
+        PlanCtx c; c.user = u; c.paths = make_paths(u, "t"); c.paths.data = d + "/data"; c.paths.home = d + "/data/home";
+        c.policy = &pol; c.session = d + "/sess"; fs::create_directories(c.session);
+        display::Setup wl;
+        wl.backend = "wayland-host";
+        wl.binds.push_back({"/run/user/1000/wayland-0", "/run/user/1000/wayland-0", true});
+        wl.env.emplace_back("WAYLAND_DISPLAY", "wayland-0");
+        c.display = wl;
+        Plan pw = build_plan(p, c);
+        CHECK(has_seq(pw.b.args(), {"--bind", "/run/user/1000/wayland-0", "/run/user/1000/wayland-0"}));
+        CHECK(has_seq(pw.b.args(), {"--setenv", "WAYLAND_DISPLAY", "wayland-0"}));
+        CHECK(!has_seq(pw.b.args(), {"--setenv", "DISPLAY", ":90"}));
+        CHECK((pw.b.cmd() == Strings{"sh"}));                                             // no background => command untouched
+        c.display->background = "i3";                                                     // what the X11 backend sets for `wm`
+        Plan px = build_plan(p, c);
+        CHECK(px.b.cmd().size() == 5 && px.b.cmd()[0] == "/bin/sh" && px.b.cmd()[2] == "i3 & exec \"$@\"" && px.b.cmd()[4] == "sh");
+        fs::remove_all(d);
+    });
+
     test("xauth file format", [] {
         char tmpl[] = "/tmp/hf-xa-XXXXXX";
         std::string d = mkdtemp(tmpl);
-        write_xauth(d + "/x", "91", std::string(16, 'A'));
+        display::write_xauth(d + "/x", "91", std::string(16, 'A'));
         std::string s = read_file(d + "/x");
         CHECK(s.size() == 2 + 2 + 2 + 2 + 2 + 18 + 2 + 16);
         CHECK((unsigned char)s[0] == 0xff && (unsigned char)s[1] == 0xff);   // FamilyWild
@@ -690,7 +804,10 @@ int main() {
         Profile p = parse_profile("[profile]\nname=t\ncommand=sh\n[bin]\nallow = sh\n[fs]\nlibs=full\n[home]\nuser=box\n[env]\nset = FOO=bar\n", "t");
         PlanCtx c; c.user = u; c.paths = make_paths(u, "t"); c.paths.data = d + "/data"; c.paths.home = d + "/data/home";
         c.policy = &pol; c.session = d + "/sess"; fs::create_directories(c.session);
-        c.display = DisplayInfo{":90", "/tmp/.X11-unix/X90", "", false};                  // what a Xephyr profile gets
+        display::Setup ds;                                                                // what an X11 nested profile gets
+        ds.binds.push_back({"/tmp/.X11-unix/X90", "/tmp/.X11-unix/X90", true});
+        ds.env.emplace_back("DISPLAY", ":90");
+        c.display = ds;
         const Strings a = build_plan(p, c).b.args();
         size_t clear = a.size(), first_set = a.size(), display = a.size();
         for (size_t i = 0; i < a.size(); ++i) {

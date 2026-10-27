@@ -33,7 +33,7 @@ void print_usage(FILE* f) {
     row("check PROFILE", "validate a profile");
 
     head("PROFILES AND DATA");
-    row("list [libs|os|deps]", "list profiles (or lib / os / dep files)");
+    row("list [libs|os|deps|displays]", "list profiles (or lib / os / dep / display files)");
     row("libs [OS]", "scan this host, print its library file list");
 
     head("NETWORK (ivpn)");

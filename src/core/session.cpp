@@ -11,7 +11,8 @@
 #include "core/launch.hpp"
 #include "core/seccomp.hpp"
 #include "net/netns.hpp"
-#include "ui/display.hpp"
+#include "protocol/display/display.hpp"
+#include "ui/clipboard.hpp"
 #include "util/log.hpp"
 
 namespace hf {
@@ -84,19 +85,13 @@ void validate_profile(const Profile& p, bool has_cmd) {
     if (p.clipboard_out && !fs::path(p.clipboard_path).is_absolute()) throw ProfileError("[clipboard] path must be absolute");
     if (p.root == RootMode::Host) {
         if (p.bins.empty()) log::warn("host mode with an empty [bin] allow list: nothing will be runnable");
-        if (!p.wm.empty()) {
-            bool sh = false;
-            for (auto& b : p.bins) if (b == "sh" || b.rfind("sh=", 0) == 0) sh = true;
-            if (!sh) throw ProfileError("[display] wm needs 'sh' in [bin] allow");
-        }
     } else {
         if (!p.bins.empty()) log::warn("[bin] is ignored in bundle mode (the bundle is the whole userland)");
         if (p.bundle_id.empty()) throw ProfileError("bundle profile without a resolved os: set [profile] os = NAME (data/os/NAME.os, kind = bundle)");
     }
     if (p.net == NetMode::Ivpn && p.wg_conf.empty()) throw ProfileError("[network] mode=ivpn needs wg_conf = /path/to/wireguard.conf");
-    if (p.display == DisplayMode::None && !p.wm.empty())
-        log::warn("[display] wm is set but display mode is none; it will be ignored by the X server (none)");
-    if (p.display == DisplayMode::None && p.audio) log::warn("audio without display: allowed, but unusual");
+    display::validate(p);                              // consent for host displays, X11-only keys, unimplemented combinations
+    if (!p.display && p.audio) log::warn("audio without display: allowed, but unusual");
 }
 
 Strings debug_shell(const Profile& p) {
@@ -154,7 +149,7 @@ int run_profile(Profile p, RunOptions o) {
     if (c.pasta && !o.dry) pasta = find_pasta();
 
     std::unique_ptr<NetNs> ns;
-    std::unique_ptr<XephyrServer> xs;
+    std::unique_ptr<display::Backend> disp;
     std::unique_ptr<ClipboardBridge> cb;
 
     if (p.net == NetMode::Ivpn) {
@@ -168,12 +163,8 @@ int run_profile(Profile p, RunOptions o) {
             ns->up();
         }
     }
-    if (p.display == DisplayMode::Xephyr) {
-        if (o.dry) { DisplayInfo d; d.display = ":90"; d.socket = "/tmp/.X11-unix/X90"; c.display = d; }
-        else { xs = XephyrServer::start(pr.user, p, sd.path); c.display = xs->info(); }
-    } else if (p.display == DisplayMode::Host) {
-        c.display = o.dry ? DisplayInfo{":0", "/tmp/.X11-unix/X0", "", true} : host_x11(pr.user, p);
-    }
+    disp = display::open(p, pr.user, sd.path, o.dry);   // nullptr without a display; X11 and Wayland differ only inside protocol/display
+    if (disp) c.display = disp->setup();
 
     Plan plan = build_plan(p, c);
 
@@ -190,7 +181,7 @@ int run_profile(Profile p, RunOptions o) {
                   p.net == NetMode::None ? "none" : p.net == NetMode::Host ? "host" : p.net == NetMode::Pasta ? "pasta" : "ivpn", ")"));
     int rc = run_sandbox(full, p.terminal == TermMode::Filter, ns && c.pty_proxy);
     if (rc != 0) log::info(cat("sandbox exited with code ", rc));
-    return rc;    // destructors: clipboard -> Xephyr -> netns (rules, veth, namespace) -> session dir
+    return rc;    // destructors: clipboard -> display backend (e.g. Xephyr) -> netns (rules, veth, namespace) -> session dir
 }
 
 int net_test(Profile p, const RunOptions& o) {

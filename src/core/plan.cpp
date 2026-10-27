@@ -57,18 +57,6 @@ Strings match_font_files(const fs::path& root, const Strings& families, size_t c
     return out;
 }
 
-void write_xauth(const fs::path& file, const std::string& num, const std::string& cookie) {
-    auto be16 = [](std::string& s, uint16_t v) { s.push_back(char(v >> 8)); s.push_back(char(v & 0xff)); };
-    static const std::string name = "MIT-MAGIC-COOKIE-1";
-    std::string d;
-    be16(d, 0xffff);                       // FamilyWild
-    be16(d, 0);                            // empty address
-    be16(d, static_cast<uint16_t>(num.size())); d += num;
-    be16(d, static_cast<uint16_t>(name.size())); d += name;
-    be16(d, static_cast<uint16_t>(cookie.size())); d += cookie;
-    write_file(file, d, 0600);
-}
-
 namespace {
 
 const char* kXdgSub[] = {".config", ".cache", ".local/share", ".local/state", ".local/bin"};
@@ -333,13 +321,11 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
     }
 
     // -- display / audio / clipboard -------------------------------------------
-    if (c.display) {
-        b.bind(c.display->socket, c.display->socket);
-        b.setenv("DISPLAY", c.display->display);
-        if (!c.display->authfile.empty()) {
-            b.ro_bind(c.display->authfile, "/tmp/.Xauthority");
-            b.setenv("XAUTHORITY", "/tmp/.Xauthority");
+    if (c.display) {                                   // protocol-neutral: binds and variables, whatever X11 or Wayland needs
+        for (const auto& d : c.display->binds) {
+            if (d.rw) b.bind(d.host, d.sandbox); else b.ro_bind(d.host, d.sandbox);
         }
+        for (const auto& [k, v] : c.display->env) b.setenv(k, v);
     }
     if (p.audio) {
         fs::path sock = c.user.runtime_dir / "pulse/native";
@@ -376,8 +362,8 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
     Strings cmd = c.command_override.empty() ? p.command : c.command_override;
     if (cmd.empty()) throw ProfileError("no command: set [profile] command or pass one after --");
     for (auto& w : cmd) w = expand(w, vc);
-    if (!p.wm.empty()) {
-        Strings wrapped = {"/bin/sh", "-c", p.wm + " & exec \"$@\"", "holdfast"};
+    if (c.display && !c.display->background.empty()) {   // X11: the window manager; nothing for Wayland
+        Strings wrapped = {"/bin/sh", "-c", c.display->background + " & exec \"$@\"", "holdfast"};
         wrapped.insert(wrapped.end(), cmd.begin(), cmd.end());
         cmd = wrapped;
     }

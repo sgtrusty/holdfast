@@ -189,8 +189,9 @@ Profile dep_profile(const Profile& p, const DepRecipe& d) {
     Profile r = p;
     r.net = d.net;
     r.cwd = CwdMode::None;
-    r.display = DisplayMode::None;
-    r.wm.clear();
+    r.display.reset();
+    r.display_use.clear();
+    r.allow_host_display = false;
     r.audio = false;
     r.clipboard_out = false;
     r.dep_use.clear();

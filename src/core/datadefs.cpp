@@ -191,6 +191,48 @@ DepRecipe parse_dep(const std::string& text, const std::string& origin, const st
     return d;
 }
 
+DisplayDef parse_display(const std::string& text, const std::string& origin, const std::string& name) {
+    DisplayDef d;
+    d.name = name;
+    bool have_server = false, size_set = false, xauth_set = false;
+    for (const IniLine& l : parse_ini(text, origin)) {
+        if (l.section != "display") throw ProfileError(cat(origin, ":", l.no, ": unknown section [", l.section, "]"));
+        if (l.key == "name") {
+            if (l.value != name) bad(l, origin, "must match the file name (" + name + ")");
+        } else if (l.key == "description") {
+            d.description = l.value;
+        } else if (l.key == "server") {
+            const std::string x = lower(l.value);
+            if (x == "xephyr") { d.protocol = DisplayProtocol::X11; d.mode = DisplayMode::Nested; }
+            else if (x == "host") d.mode = DisplayMode::Host;      // protocol follows your session: see display::effective_protocol
+            else bad(l, origin, "expected xephyr|host (no display at all = leave `use` out of the profile)");
+            have_server = true;
+        } else if (l.key == "protocol" || l.key == "mode") {
+            bad(l, origin, "replaced by `server = xephyr|host`: Xephyr is X11, and host uses whatever your session runs");
+        } else if (l.key == "size") {
+            d.size = l.value;
+            size_set = true;
+        } else if (l.key == "xauth") {
+            const std::string x = lower(l.value);
+            if (x == "yes" || x == "true" || x == "on" || x == "1") d.xauth = true;
+            else if (x == "no" || x == "false" || x == "off" || x == "0") d.xauth = false;
+            else bad(l, origin, "expected yes|no");
+            xauth_set = true;
+        } else if (l.key == "wm") {
+            d.wm = l.value;
+        } else {
+            bad(l, origin, "unknown key");
+        }
+    }
+    if (!have_server) throw ProfileError(origin + ": [display] server = xephyr|host is required");
+    const bool x11_nested = d.mode == DisplayMode::Nested;
+    if (!x11_nested && (size_set || xauth_set || !d.wm.empty()))
+        throw ProfileError(origin + ": size, xauth and wm configure Xephyr (server = xephyr); your host session has its own, and Wayland has no window manager to start");
+    static const std::regex size_ok(R"(^\d{3,5}x\d{3,5}$)");
+    if (x11_nested && !std::regex_match(d.size, size_ok)) throw ProfileError(origin + ": size must look like 1280x800");
+    return d;
+}
+
 std::optional<fs::path> find_data(const Strings& roots, const std::string& kind, const std::string& name) {
     if (!valid_data_name(name)) return std::nullopt;
     for (const auto& r : roots) {                       // the directory (profile/ lib/ os/) says what a file is; the extension is always .profile
@@ -213,6 +255,12 @@ DepRecipe load_dep(const std::string& name, const Strings& roots) {
     auto f = find_data(roots, "dep", name);
     if (!f) throw ProfileError(cat("dep '", name, "' not found; create data/dep/", name, ".profile (searched: ", join(roots, ", "), ")"));
     return parse_dep(read_file(*f), f->string(), name);
+}
+
+DisplayDef load_display(const std::string& name, const Strings& roots) {
+    auto f = find_data(roots, "display", name);
+    if (!f) throw ProfileError(cat("display '", name, "' not found; create data/display/", name, ".profile (searched: ", join(roots, ", "), ")"));
+    return parse_display(read_file(*f), f->string(), name);
 }
 
 OsDef load_os(const std::string& name, const Strings& roots) {
@@ -284,6 +332,9 @@ std::string render_os(const OsDef& o) {
 }
 
 void resolve_profile_data(Profile& p, const Strings& roots) {
+    // The display first: every profile has one (or none), and the paths below return early.
+    if (p.display_use.empty()) p.display.reset();
+    else p.display = load_display(p.display_use, roots);
     if (p.root == RootMode::Bundle) {
         if (p.os.empty())
             throw ProfileError(cat("bundle profile '", p.name, "' needs [profile] os = NAME (a kind = bundle file in data/os/)"));

@@ -17,7 +17,8 @@ plugin) running as your uid, able to execute arbitrary code *inside* the sandbox
 | Network exfiltration | Default fresh empty netns | `host`/`ivpn` give network by design |
 | IP / DNS leak when VPN drops | Default-DROP firewall armed before tunnel, endpoint-only host NAT, tunnel DNS, IPv6 policy DROP | Needs correct host `iptables`; nft-only hosts rely on the iptables-nft shim; Docker's FORWARD chain ordering is handled by inserting at position 1 |
 | Privilege escalation via VPN config | `PostUp`/hooks rejected; config copied; names validated before `rm -rf` | You still run wg-quick as root on a config you chose |
-| Snoop/inject via X11 | Private Xephyr + random cookie (no host X) | `mode=host` is full exposure (needs explicit flag) |
+| Snoop/inject via X11 | Private Xephyr + random cookie (no host X) | `server = host` on X11 is full exposure (needs `allow_host = yes`) |
+| Abuse of the host Wayland compositor | Wayland clients cannot read each other's windows or input by design; `server = host` needs `allow_host = yes` | The compositor may offer privileged extensions (screen capture, virtual input) to any client; `wp_security_context_v1` is not used yet |
 | Steal microphone | Off by default | `audio=pulse` exposes it to all processes |
 | Clipboard sniffing | One-way bridge only | Sandbox can overwrite your clipboard |
 | Fingerprinting | Fake identity/hostname, no machine-id, restricted fonts | Browser-level fingerprints remain |
