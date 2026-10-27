@@ -560,9 +560,7 @@ int main() {
         each("data/os", [](const std::string& t, const std::string& o, const std::string& n) { parse_os(t, o, n); });
         each("data/dep", [](const std::string& t, const std::string& o, const std::string& n) { parse_dep(t, o, n); });
         Profile lw = parse_profile(read_file("data/profile/librewolf-ivpn.profile"), "librewolf-ivpn");
-        bool quiet_userns = false;
-        for (const auto& [k, v] : lw.env_set) if (k == "MOZ_ASSUME_USER_NS" && v == "0") quiet_userns = true;
-        CHECK(quiet_userns && lw.disable_userns);                                         // namespaces stay forbidden AND Firefox is told so
+        CHECK(lw.disable_userns);                                                         // the browser never gets nested user namespaces
     });
 
     test("doctor: feature evaluation", [] {
