@@ -1,6 +1,6 @@
 # One Alpine userland, shared by every profile with `os = alpine-3.24-dev` (<data>/bundles/alpine-3.24-dev/rootfs).
 # Everything that defines the userland lives here and nowhere else: change a package or the pinned release
-# once, then `holdfast bundle setup PROFILE --refresh`. Profiles keep only their own `provision` lines.
+# once, then `holdfast run --refresh PROFILE` rebuilds it. Profiles keep only their own `provision` lines.
 [os]
 kind = bundle
 description = Alpine 3.24 with Go and Rust toolchains

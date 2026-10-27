@@ -10,7 +10,7 @@
 #include "util/sys.hpp"
 
 #ifndef HOLDFAST_SHARE_DIR
-#define HOLDFAST_SHARE_DIR "/usr/local/share/holdfast"
+#define HOLDFAST_SHARE_DIR "/opt/holdfast"
 #endif
 
 namespace hf {
@@ -30,13 +30,31 @@ bool valid_data_name(const std::string& n) {
     return std::regex_match(n, ok);
 }
 
+bool is_exact_alpine_release(const std::string& v, std::string* branch) {
+    static const std::regex re(R"(v?([0-9]+\.[0-9]+)\.[0-9]+)");
+    std::smatch m;
+    if (!std::regex_match(v, m, re)) return false;
+    if (branch) *branch = "v" + m[1].str();
+    return true;
+}
+
 Strings data_roots(const std::string& home) {
     Strings r;
     if (const char* e = std::getenv("HOLDFAST_DATA"); e && *e) r.push_back(e);
     if (const char* e = std::getenv("HOLDFAST_SHARE"); e && *e) r.push_back(std::string(e) + "/data");
     if (!home.empty()) r.push_back(home + "/.config/holdfast/data");
     r.push_back("/etc/holdfast/data");
-    r.push_back(std::string(HOLDFAST_SHARE_DIR) + "/data");
+    // The data that ships with holdfast sits next to the binary: <prefix>/bin/holdfast -> <prefix>/data. That is
+    // /opt/holdfast after `predep install`, and the checkout itself when you run ./bin/holdfast from a clone. The path
+    // comes from /proc/self/exe, so a symlink on PATH (e.g. /usr/local/bin/holdfast) still finds it.
+    std::error_code ec;
+    const fs::path exe = fs::read_symlink("/proc/self/exe", ec);
+    if (!ec) {
+        const fs::path shipped = exe.parent_path().parent_path() / "data";
+        if (fs::is_directory(shipped, ec)) r.push_back(shipped.string());
+    }
+    const std::string installed = std::string(HOLDFAST_SHARE_DIR) + "/data";
+    if (std::find(r.begin(), r.end(), installed) == r.end()) r.push_back(installed);
     return r;
 }
 
@@ -125,6 +143,12 @@ OsDef parse_os(const std::string& text, const std::string& origin, const std::st
     }
     if (o.kind == OsKind::Host && o.id.empty())
         throw ProfileError(origin + ": [os] id (the /etc/os-release ID) is required for kind = host");
+    if (o.kind == OsKind::Bundle) {
+        if (!is_exact_alpine_release(o.alpine_version))
+            throw ProfileError(origin + ": [os] alpine_version must be an exact release such as 3.24.3 "
+                                        "(moving aliases like latest-stable cannot be pinned or shared)");
+        if (o.alpine_mirror.rfind("https://", 0) != 0) throw ProfileError(origin + ": [os] alpine_mirror must be an https:// URL");
+    }
     return o;
 }
 

@@ -9,6 +9,7 @@ struct RunOptions {
     bool dry = false;                   // print the plan, change nothing
     bool yes = false;                   // answer "yes" to the cwd prompt
     bool no_cwd = false;
+    bool refresh = false;               // bundle profiles: rebuild the userland from its data/os definition first
     std::optional<fs::path> cwd;
     std::optional<NetMode> net;
     std::optional<std::string> wg_conf;

@@ -2,8 +2,8 @@
 # used to build and run the lazygit "stage hunks" test build.
 # Replaces: develbox.sh
 #
-#   holdfast bundle setup lazygit-dev       # one-time: download+verify Alpine, apk add, build tools
-#   cd ~/some/repo && holdfast run lazygit-dev
+#   cd ~/some/repo && holdfast run lazygit-dev    # first run downloads + verifies Alpine and installs the tools (in sandboxes)
+#   holdfast run --refresh lazygit-dev            # rebuild the userland after editing data/os/alpine-3.24-dev.profile
 
 [profile]
 name        = lazygit-dev

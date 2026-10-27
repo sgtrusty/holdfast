@@ -57,12 +57,11 @@ local WARN = {
   "-Wno-sign-conversion", "-fstack-protector-strong",
 }
 
--- Mirrors the old CMake compile definitions (HOLDFAST_VERSION +
--- HOLDFAST_SHARE_DIR). SHARE_DIR follows the previous install prefix
--- (/usr/local/share/holdfast).
+-- HOLDFAST_SHARE_DIR is the install prefix (see [install] in predep.toml): the shipped data is read from
+-- <prefix>/data. The binary also looks next to itself first, so a checkout works without installing.
 local SHARED_DEFINES = {
   'HOLDFAST_VERSION="0.1.0"',
-  'HOLDFAST_SHARE_DIR="/usr/local/share/holdfast"',
+  'HOLDFAST_SHARE_DIR="/opt/holdfast"',
 }
 if seccomp then
   table.insert(SHARED_DEFINES, "HOLDFAST_HAVE_SECCOMP=1")

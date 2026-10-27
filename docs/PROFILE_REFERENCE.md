@@ -90,5 +90,6 @@ Input is relayed byte for byte. If the terminal ever stays raw after a hard kill
 
 The userland itself (`alpine_version`, `alpine_mirror`, `alpine_sha256`, `packages`) is **not** a profile setting any more.
 It lives once in `data/os/NAME.profile` (`kind = bundle`) and profiles say `os = NAME`; every profile naming the same file shares
-one rootfs under `<data>/bundles/NAME`, and `setup`/`run` verify the installed bundle was built from the current file.
-Old inline keys in `[bundle]` are errors that point here. See `docs/DATA.md`.
+one rootfs under `<data>/bundles/NAME`. There is no setup command: the first `run` creates it (inside sandboxes) and later runs
+verify it was built from the current file; `holdfast run --refresh PROFILE` rebuilds it. Old inline keys in `[bundle]` are
+errors that point here. See `docs/DATA.md`.

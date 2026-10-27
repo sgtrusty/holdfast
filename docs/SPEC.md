@@ -42,11 +42,13 @@ Dependency direction (no cycles): `util` ← `core/{profile,paths,argbuilder}` �
 ## 3. CLI
 
 ```
-holdfast run [opts] PROFILE [-- CMD...]     holdfast bundle setup|shell|info|purge PROFILE [--refresh]
+holdfast run [opts] PROFILE [-- CMD...]     holdfast libs [--check|--refresh] [OS]
 holdfast print|check PROFILE                holdfast net-test PROFILE | net-cleanup NAME
-holdfast purge PROFILE [-y]                 holdfast init [NAME] | list | doctor | version
-opts: --net=none|host|ivpn --wg=FILE --cwd=DIR --no-cwd -y -n/--dry-run -v
+holdfast list [libs|os]                     holdfast doctor | help | version
+opts: --net=none|pasta|host|ivpn --wg=FILE --cwd=DIR --no-cwd -y -n/--dry-run --refresh --check -v
 ```
+There is no bundle or purge command: a bundle profile sets its userland up on first `run`, and state is plain folders
+under the data dir that you can inspect or delete (`doctor` prints the location). Details: `docs/CONCEPTS.md`, `src/cli/args.cpp`.
 `--` ends option parsing; everything after replaces `[profile] command`.
 
 ## 4. Profile model
@@ -112,16 +114,20 @@ but binaries are still checked against the deny set.
 ## 8. Bundle subsystem
 
 Layout: `<data>/cache/alpine/<arch>/alpine-minirootfs-X.Y.Z-<arch>.tar.gz`,
-`<data>/profiles/<name>/{rootfs,home,provision.stamp}`; `<data>` = `$HOLDFAST_HOME` or
-`~/.local/share/holdfast`. Arch ∈ {x86_64, aarch64}; bundles are per profile *and* per host arch.
+`<data>/bundles/<os>/{rootfs,spec.stamp,tarball.sha256}`, `<data>/profiles/<name>/{home,provision.stamp}`; `<data>` =
+`$HOLDFAST_HOME` or `~/.local/share/holdfast`. Arch ∈ {x86_64, aarch64}. `<os>` is the `data/os` file the profile names.
 
-`bundle setup`: (1) resolve tarball name from the mirror index (`<mirror>/<version>/releases/<arch>/`),
-download (HTTPS-only, TLS≥1.2) unless cached; (2) verify sha256 against `alpine_sha256` if pinned, else
-against the mirror's `.sha256`; delete + fail on mismatch; (3) extract unprivileged into `rootfs.tmp`
-(`--no-same-owner`, no `/dev/*`), atomically rename; (4) provision: bwrap with the rootfs bound **writable**
-at `/`, `--uid 0 --gid 0` (userns-mapped), network on, fake home bound, running
-`set -e; apk update; apk add --no-cache <packages>; <provision lines…>`; (5) write the stamp
-`sha256(version|mirror|pin|packages|provision)`. Runs warn when the stamp differs.
+`bundle_ensure` (called by `run`; `print`/`check` only verify): nothing installed → set it up; installed and
+`spec.stamp` equal → done (re-provision only if the provision stamp differs); installed but the definition changed → error
+unless `--refresh`. Setting up, with no host process touching the downloaded bytes:
+(1) a **bootstrap sandbox** (`--unshare-all`, network through pasta, default seccomp, host `sh curl tar gzip sha256sum …`
+bound read-only, only `/cache` and `/work` writable) downloads `<mirror>/v<X.Y>/releases/<arch>/alpine-minirootfs-<X.Y.Z>-<arch>.tar.gz`
+(exact releases only; HTTPS, TLS ≥ 1.2) unless a cached file matches the pinned hash; (2) verifies sha256 against
+`alpine_sha256` if pinned, else against the mirror's `.sha256`, deleting the file and failing on mismatch; (3) extracts into
+`rootfs.tmp` (`--no-same-owner`, no `/dev/*`) and renames it to `rootfs`; the host then writes `spec.stamp =
+sha256(version|mirror|pin|packages)`; (4) a **provision sandbox**: the rootfs bound **writable** at `/`, `--uid 0 --gid 0`
+(userns-mapped), network through pasta, fake home bound, running `set -e; apk update; apk add --no-cache <packages>;
+<provision lines…>`; then `provision.stamp = sha256(version|mirror|pin|packages|provision)` is written.
 
 ## 9. Network namespace subsystem (`NetNs`)
 
@@ -146,7 +152,7 @@ dns → wg-quick up → wg-iface rules → verify`. Any exception → `down()` (
 ## 11. Error handling & exit codes
 `Error` → 1 · `PolicyError` → 3 · unexpected `std::exception` → 70 · usage → 2 · otherwise child status.
 All diagnostics go to stderr with `[hf]`, `[hf:WARN]`, `[hf:ERROR]` prefixes; stdout is reserved for
-`print`, `list`, `init`, `bundle info`.
+`print`, `list`, `libs`.
 
 ## 12. Verification status (v0.1)
 
@@ -157,5 +163,5 @@ All diagnostics go to stderr with `[hf]`, `[hf:WARN]`, `[hf:ERROR]` prefixes; st
 | netns lifecycle (add/veth/rules/kill-switch/teardown, concurrency lock, stale recovery, `ip_forward` restore, DNS overlay) | exercised for real with a stub `wg-quick`/`wg` |
 | Real WireGuard handshake against IVPN, `net-test` check 1 | **not exercised** (no tunnel available) |
 | Xephyr startup / cookie auth, clipboard bridge, host-X11, pulse | **not exercised** (no X server in CI image) |
-| `bundle setup` (download, verify, extract, apk provisioning) and bundle-mode *run* | plan generation tested against a fake rootfs; network stages **not exercised** |
-| Seccomp | not implemented (external BPF file supported) |
+| Bundle setup on first `run` (sandboxed download, verify, extract, apk provisioning) and bundle-mode *run* | spec/stamp logic and plan generation unit-tested; the sandboxed network stages **not exercised** |
+| Seccomp, pasta, terminal filter, `libs = minimal` | see `docs/DEFERRED.md` (written and unit-tested; not yet exercised under a real bwrap) |

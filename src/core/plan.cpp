@@ -127,14 +127,7 @@ void mount_host_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, const 
 
     // usr-merge symlinks are needed in both modes (the dynamic loader path in every ELF goes through them);
     // whole library directories only in `libs = full`.
-    for (const char* l : {"/lib", "/lib64"}) {
-        std::error_code ec;
-        if (fs::is_symlink(l, ec)) { if (fs::exists(l, ec)) b.symlink(fs::read_symlink(l).string(), l); }
-        else if (fs::is_directory(l, ec) && p.libs == LibsMode::Full) b.ro_bind_try(l, l);
-    }
-    if (p.libs == LibsMode::Full)
-        for (const char* d : {"/usr/lib", "/usr/lib64"})
-            if (fs::is_directory(d)) b.ro_bind(d, d);
+    bind_host_library_dirs(b, p.libs == LibsMode::Full);
 
     std::set<std::string> seen;
     for (const std::string& tok : p.bins) {
@@ -174,7 +167,7 @@ void mount_host_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, const 
 void mount_bundle_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, std::set<std::string>& etc_skip) {
     const fs::path R = c.paths.rootfs;
     if (!fs::is_directory(R / "usr"))
-        throw Error(cat("bundle for profile '", p.name, "' is not installed; run: holdfast bundle setup ", p.name));
+        throw Error(cat("the Alpine userland for profile '", p.name, "' is not set up yet; run the profile once (holdfast run ", p.name, ") and it is created"));
     for (const char* t : {"bin", "sbin", "lib", "lib64", "usr"}) {
         fs::path s = R / t;
         std::error_code ec;
@@ -225,6 +218,17 @@ void mount_fonts(ArgBuilder& b, const Profile& p, const PlanCtx& c, const fs::pa
 // ---------------------------------------------------------------------------------
 // the plan
 // ---------------------------------------------------------------------------------
+
+void bind_host_library_dirs(ArgBuilder& b, bool whole) {
+    for (const char* l : {"/lib", "/lib64"}) {
+        std::error_code ec;
+        if (fs::is_symlink(l, ec)) { if (fs::exists(l, ec)) b.symlink(fs::read_symlink(l).string(), l); }
+        else if (fs::is_directory(l, ec) && whole) b.ro_bind_try(l, l);
+    }
+    if (whole)
+        for (const char* d : {"/usr/lib", "/usr/lib64"})
+            if (fs::is_directory(d)) b.ro_bind(d, d);
+}
 
 Plan build_plan(const Profile& p, const PlanCtx& c) {
     if (!c.policy) throw Error("internal: policy missing");

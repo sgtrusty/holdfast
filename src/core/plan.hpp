@@ -35,6 +35,10 @@ struct Plan {
 
 Plan build_plan(const Profile& p, const PlanCtx& c);
 
+// The usr-merge symlinks (/lib, /lib64) every ELF's loader path goes through, and with `whole` also the host's
+// /usr/lib, /usr/lib64 (and real /lib dirs) read-only. Shared by `libs = full` profiles and the bundle bootstrap sandbox.
+void bind_host_library_dirs(ArgBuilder& b, bool whole);
+
 // Every `.git` (directory OR file, as in worktrees/submodules) below root.
 // Does not descend into matches.
 std::vector<fs::path> find_git_entries(const fs::path& root, size_t cap = 100000);

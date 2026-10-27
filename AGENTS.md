@@ -29,7 +29,7 @@ The build is described in `premake5.lua`; `predep.toml` declares the `build`/`te
 5. **Kill switch before tunnel.** In `NetNs::up()` the default-DROP policy must be installed before `wg-quick up`. Host rules stay scoped to `endpoint:port/udp`.
 6. **Cleanup is RAII and idempotent.** Anything created in `run_profile` (netns, X server, session dir, rules, sysctl) must be undone by a destructor, and by `net-cleanup` if it can outlive the process. Validate names (`valid_ns_name`) before any `rm -rf`.
 7. **Bind order**: parents before children; the `.git` read-only binds must come after the rw bind of the tree.
-8. **stdout is data** (`print`, `list`, `init`, `bundle info`); logs go to stderr via `hf::log`.
+8. **stdout is data** (`print`, `list`, `libs`); logs go to stderr via `hf::log`.
 9. Files written for the sandbox use `write_file`/`make_private_dir` (0600/0700 and root→user chown when run via sudo).
 10. bwrap takes the **command on the real argv**, not from `--args` (verified); keep `ArgBuilder::cmd()` separate.
 
@@ -40,6 +40,7 @@ The build is described in `premake5.lua`; `predep.toml` declares the `build`/`te
 | New deny path / sensitive root | `Policy` ctor / `is_sensitive_root` in `core/paths.cpp` → policy test |
 | New bwrap flag | `ArgBuilder` (+ `pretty()` arity list) → `plan.cpp` → invariant test in `test_main.cpp` |
 | Firewall/netns change | `net/netns.cpp`; extend `NetNs::selftest`; re-run the stub lifecycle (below) |
+| New command or CLI option | help text and `parse_args` in `src/cli/args.cpp` (keep the help columns aligned) → dispatch in `src/main.cpp` → case in the `cli: option parsing` test |
 | New helper binary | add to `doctor()`; check with `which()` and give an actionable error |
 | New tool a minimal-libs profile can use | `data/lib/NAME.profile` (commands, sonames, paths, needs) → `holdfast libs --refresh` on each supported OS → commit the changed `data/os/*.profile`. No C++ change. |
 | New OS setup (bundle packages / pinned release, or a host distro lock) | `data/os/NAME.profile`; never inline version/packages in a profile. See `docs/DATA.md`. |

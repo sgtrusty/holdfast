@@ -56,10 +56,14 @@ paths = ["root://bin", "root://obj"]
 
 [install]
 depends = ["build"]
-dir = "/usr/local"
-symlink = false
+# Everything goes under one prefix so the binary can find its data next to itself (bin/holdfast -> ../data):
+#   /opt/holdfast/bin/holdfast  /opt/holdfast/data/{profile,lib,os}  /opt/holdfast/docs
+# predep's `symlink = true` links the FIRST artifact (the binary) so it is on PATH; where predep puts that link is up to
+# predep, and holdfast does not care: it resolves /proc/self/exe back to /opt/holdfast/bin.
+dir = "/opt/holdfast"
+symlink = true
 artifacts = [
   { source = "root://bin/holdfast", dest = "bin/holdfast", chmod = 755 },
-  { source = "root://profiles", dest = "share/holdfast/profiles" },
-  { source = "root://docs", dest = "share/doc/holdfast" },
+  { source = "root://data", dest = "data" },       # profile/ lib/ os/ (see docs/DATA.md)
+  { source = "root://docs", dest = "docs" },
 ]

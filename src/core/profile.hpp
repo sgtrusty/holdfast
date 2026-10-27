@@ -79,7 +79,7 @@ struct Profile {
     // [bundle] provision is per profile. Everything else below is NOT parsed from the profile: it comes from
     // the profile's data/os file (bundle kind) via resolve_profile_data(), so one OS setup is declared once.
     std::string bundle_id;         // = the os name; every profile naming the same os shares one userland
-    std::string alpine_version = "latest-stable";
+    std::string alpine_version;
     std::string alpine_mirror = "https://dl-cdn.alpinelinux.org/alpine";
     std::string alpine_sha256;     // optional pin of the minirootfs tarball
     Strings apk_packages;

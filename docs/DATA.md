@@ -25,8 +25,8 @@ ahead of time** and saves "python3 needs these exact files on this distro" in th
 - `holdfast libs --refresh` scans this machine and creates or updates the list,
 - `holdfast libs --check` compares the saved list with this machine and tells you when an OS upgrade made it out of date.
 
-The same word, **refresh**, is used for bundles: `holdfast bundle setup PROFILE --refresh` redoes the userland from the
-current `data/os` file (re-download, re-extract, reinstall packages) after you changed it.
+The same word, **refresh**, is used for bundles: `holdfast run --refresh PROFILE` rebuilds the userland from the current
+`data/os` file (re-extract, reinstall packages) after you changed it.
 
 ## Search order
 
@@ -57,15 +57,15 @@ archives, which no minimal set provides. Profiles that need them say `libs = ful
 ```ini
 [os]
 kind = bundle
-alpine_version = 3.24.3            # exact release: fetched by name, nothing moves under you
-alpine_sha256  = f8e1caf...        # pin the tarball
+alpine_version = 3.24.3            # an exact release is required (fetched by name; latest-stable / v3.24 / edge are rejected)
+alpine_sha256  = f8e1caf...        # pin the tarball (strongly recommended; without it only the mirror's own .sha256 is checked)
 packages = ca-certificates build-base git bash curl go rust cargo
 ```
 
 Every profile with `[profile] os = NAME` shares `<data>/bundles/NAME/rootfs`; the fake `$HOME` stays per profile and
-`provision` lines stay in the profile. `setup` and `run` verify the installed bundle was built from this file's current
-version/mirror/sha256/packages and refuse otherwise. After editing the file: `holdfast bundle setup PROFILE --refresh`
-(rebuilds the userland for every profile sharing it).
+`provision` lines stay in the profile. The first `holdfast run` of any of them creates the userland (inside sandboxes), and
+each later run verifies it was built from this file's current version/mirror/sha256/packages, refusing otherwise. After
+editing the file, `holdfast run --refresh PROFILE` rebuilds it for every profile sharing it (changes made inside are discarded).
 
 **Host** (the saved file list: which concrete files each lib needs on one distro and architecture):
 

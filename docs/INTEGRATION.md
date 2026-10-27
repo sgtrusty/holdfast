@@ -50,7 +50,7 @@ When they are terminals, the program runs on its own pty and escape sequences ar
 ## Writing the profile for your project
 
 A profile is a short INI file kept in your repository and passed by path (anything containing `/` or ending in `.profile`).
-Start from `holdfast init lazyvim` (examples ship in `data/profile/`). A small offline host-mode profile:
+Start from an example in `data/profile/` (`holdfast list -v` shows where they live). A small offline host-mode profile:
 
 ```ini
 [profile]

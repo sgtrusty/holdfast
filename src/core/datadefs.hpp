@@ -31,15 +31,18 @@ struct OsDef {
     fs::path file;
     std::string id, version;
     std::map<std::string, std::map<std::string, Strings>> files;    // arch -> lib -> sandbox paths
-    std::string alpine_version = "latest-stable", alpine_mirror = "https://dl-cdn.alpinelinux.org/alpine", alpine_sha256;
+    std::string alpine_version, alpine_mirror = "https://dl-cdn.alpinelinux.org/alpine", alpine_sha256;   // version: exact release, required
     Strings packages;
 };
 
 struct HostId { std::string id, version; };                         // /etc/os-release ID, VERSION_ID
 
 bool valid_data_name(const std::string& n);                         // becomes a file name: [a-z0-9][a-z0-9._-]{0,63}
-// Search order (first match wins): $HOLDFAST_DATA, $HOLDFAST_SHARE/data, ~/.config/holdfast/data,
-// /etc/holdfast/data, <share dir>/data.
+// "3.24.3" / "v3.24.3": an exact Alpine release (fetched by name, pinnable). Moving aliases (latest-stable, v3.24, edge) are not.
+// *branch receives "v3.24" on success.
+bool is_exact_alpine_release(const std::string& v, std::string* branch = nullptr);
+// Search order (first match wins): $HOLDFAST_DATA, $HOLDFAST_SHARE/data, ~/.config/holdfast/data, /etc/holdfast/data,
+// then the data that ships with holdfast: <dir of the binary>/../data (a checkout or /opt/holdfast) and /opt/holdfast/data.
 Strings data_roots(const std::string& home);
 
 LibDef parse_lib(const std::string& text, const std::string& origin, const std::string& name);

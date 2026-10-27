@@ -9,8 +9,7 @@ warning.
 holdfast run lazyvim              # offline editor, current dir mounted at /shared, .git read-only
 holdfast run --net=pasta lazyvim  # same, online ("sync" mode) through a private pasta netns
 holdfast run librewolf-ivpn       # amnesic browser, nested X, all traffic via a WireGuard netns
-holdfast bundle setup lazygit-dev # one-time: fetch + verify Alpine, install packages
-holdfast run lazygit-dev          # run inside the private Alpine userland
+holdfast run lazygit-dev          # first run sets up its private Alpine userland (in sandboxes), then runs in it
 holdfast print lazyvim            # show the exact bwrap command line, change nothing
 ```
 
@@ -59,5 +58,5 @@ You are an AI agent (or a human in a hurry) who just landed on this repository. 
     **Do not link it** as a library: `bin/holdfast_core.a` is an internal convenience with no stable API or ABI, no `.so`
     exists, and the process boundary is part of the security design.
   - stdout is the program's output and data (`print`, `list`, `init`); logs go to stderr; exit `3` means refused by policy.
-  - Keep a small `.profile` in your repository (start from `holdfast init NAME` or `data/profile/`), and `holdfast check`
+  - Keep a small `.profile` in your repository (copy one from `data/profile/` as a start; `holdfast list -v` shows where the shipped ones live), and `holdfast check`
     it. Do not weaken defaults (network, seccomp, terminal filter, `.git` protection) unless the user asked.

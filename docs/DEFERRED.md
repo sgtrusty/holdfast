@@ -65,8 +65,17 @@ checks (resize, Ctrl-C, mouse, exit) with `lazyvim` and `lazygit-dev`. Specific 
 - Bundles are Alpine only. The shared `os` mechanism is not Alpine-specific, but no other distro is fetched or verified.
 - The Alpine tarball hash comes from the same mirror unless you pin `alpine_sha256` in the `data/os` file; GPG verification is not implemented.
 - `provision` lines run with a shared rootfs writable; keep them to `$HOME` (packages go in the `data/os` file).
-- Bundles installed before `bundles/<id>` existed (old `profiles/<name>/rootfs`) must be set up again, and a bundle
-  profile needs `os = NAME` now (the inline `[bundle]` version/packages keys are rejected).
+- The provision sandbox (`apk add` and your lines, with network) runs without the default seccomp filter, unlike the
+  fetch/extract sandbox and the run sandbox. Adding it needs a real run to see what `apk`, `go` and `cargo` need.
+- The fetch/extract sandbox still uses host binaries (`curl tar gzip sha256sum`) with the host's `/usr/lib` mounted read-only.
+  It sees none of your files, but it is not a minimal-libs sandbox.
+- No bundle or purge command: to remove a userland or a profile's saved `$HOME`, delete its folder (`holdfast doctor`
+  prints the data dir). Bundles are shared by `os`, so deleting `bundles/<os>/` affects every profile naming it.
+- A changed `data/os` definition makes runs fail until `--refresh`; there is no incremental update (it re-extracts and
+  reinstalls everything).
+- Bundles installed by the earlier `bundle setup` layout (`profiles/<name>/rootfs`) are not migrated: the next run sets
+  up a new one. A bundle profile needs `os = NAME` (the inline `[bundle]` version/packages keys are rejected), and
+  `alpine_version` must be an exact release.
 
 ## Roadmap items still open
 

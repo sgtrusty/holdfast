@@ -7,6 +7,7 @@
 #include <regex>
 
 #include "core/bundle.hpp"
+#include "core/datadefs.hpp"
 #include "core/launch.hpp"
 #include "core/seccomp.hpp"
 #include "net/netns.hpp"
@@ -56,7 +57,12 @@ Prepared prepare(const Profile& p) {
 NetnsConfig netns_cfg(const Profile& p, const Prepared& pr, const fs::path& session, const VarCtx& vc) {
     NetnsConfig c;
     c.ns_name = p.ns_name.empty() ? derive_ns_name(p.name) : p.ns_name;
-    c.wg_conf = expand(p.wg_conf, vc);
+    const std::string conf = expand(p.wg_conf, vc);
+    std::error_code ec;
+    if (!fs::is_regular_file(conf, ec))
+        throw Error(cat("WireGuard config not found: ", conf, "\n  Download one from your VPN provider (IVPN: https://www.ivpn.net/setup/wireguard/) and save it there, "
+                        "or point at it with --wg=FILE (or [network] wg_conf).\n  It needs exactly one Endpoint, as an IPv4 literal, and no PostUp/PreUp hooks."));
+    c.wg_conf = conf;
     c.session_dir = session;
     c.lock_dir = pr.paths.run_root;
     c.octet = p.subnet_octet;
@@ -99,11 +105,7 @@ int run_profile(Profile p, const RunOptions& o) {
     validate_profile(p, !o.command.empty());
     Prepared pr = prepare(p);
 
-    if (p.root == RootMode::Bundle) {
-        if (!bundle_installed(pr.paths)) throw Error("bundle not installed; run: holdfast bundle setup " + p.name);
-        bundle_verify(p, pr.paths);
-        if (!bundle_provisioned(p, pr.paths)) log::warn("profile changed since the bundle was provisioned; run: holdfast bundle setup " + p.name);
-    }
+    if (p.root == RootMode::Bundle) bundle_ensure(p, pr.user, pr.paths, o.refresh, o.dry);   // first run builds it, in sandboxes
 
     // -- working tree ------------------------------------------------------------
     CwdMode cm = o.no_cwd ? CwdMode::None : (o.yes || o.cwd ? CwdMode::Yes : p.cwd);
@@ -196,6 +198,11 @@ int doctor() {
         std::fprintf(stderr, "  [%s] %-28s %s\n", ok ? " ok " : (required ? "FAIL" : "warn"), what.c_str(), ok ? "" : hint.c_str());
         if (!ok && required) ++bad;
     };
+    try {                                                           // plain folders: open, edit or delete them yourself
+        const User u = resolve_user();
+        std::fprintf(stderr, "where things live:\n  state, bundles, caches: %s\n  data files searched:    %s\n",
+                     make_paths(u, "x").data.c_str(), join(data_roots(u.home.string()), ", ").c_str());
+    } catch (const Error&) {}
     std::fprintf(stderr, "core:\n");
     auto bw = which("bwrap");
     row("bwrap", bw.has_value(), "apt install bubblewrap", true);
@@ -208,9 +215,9 @@ int doctor() {
     }
     row("setpriv", which("setpriv").has_value(), "util-linux", false);
     row("seccomp filter (built in)", seccomp_available(), "rebuilt without libseccomp: profiles must set `seccomp = none` or a custom .bpf", false);
-    row("pasta", which("pasta").has_value(), "package passt; required for [network] mode=pasta and `bundle setup`", false);
-    std::fprintf(stderr, "bundle mode:\n");
-    for (auto t : {"curl", "tar", "sha256sum"}) row(t, which(t).has_value(), "required for `bundle setup`", false);
+    row("pasta", which("pasta").has_value(), "package passt; required for [network] mode=pasta and for setting up a bundle profile", false);
+    std::fprintf(stderr, "bundle mode (first run fetches the userland inside a sandbox):\n");
+    for (auto t : {"curl", "tar", "gzip", "sha256sum"}) row(t, which(t).has_value(), "needed on the host to fetch a bundle userland", false);
     std::fprintf(stderr, "ivpn mode:\n");
     for (auto t : {"ip", "iptables", "wg-quick", "wg", "ping", "sudo"}) row(t, which(t).has_value(), "required for [network] mode=ivpn", false);
     row("ip6tables", which("ip6tables").has_value(), "recommended (IPv6 defence in depth)", false);

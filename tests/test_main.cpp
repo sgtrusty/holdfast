@@ -3,6 +3,7 @@
 #include <functional>
 #include <unistd.h>
 
+#include "cli/args.hpp"
 #include "core/plan.hpp"
 #include "core/elf.hpp"
 #include "core/libs.hpp"
@@ -339,6 +340,14 @@ int main() {
         THROWS(ProfileError, parse_os("[os]\nkind = host\nid = a\nalpine_version = 3\n", "t", "x"));
         THROWS(ProfileError, parse_os("[os]\nkind = host\nid = a\n[files.x86_64.b]\nbind = rel\n", "t", "x"));
         THROWS(ProfileError, parse_os("[os]\nkind = bundle\nalpine_sha256 = zz\n", "t", "x"));
+        CHECK(is_exact_alpine_release("3.24.3") && is_exact_alpine_release("v3.24.3"));
+        CHECK(!is_exact_alpine_release("latest-stable") && !is_exact_alpine_release("v3.24") && !is_exact_alpine_release("edge") && !is_exact_alpine_release(""));
+        std::string branch;
+        CHECK(is_exact_alpine_release("3.24.3", &branch) && branch == "v3.24");
+        THROWS(ProfileError, parse_os("[os]\nkind = bundle\nalpine_version = latest-stable\n", "t", "x"));          // moving alias: cannot be pinned
+        THROWS(ProfileError, parse_os("[os]\nkind = bundle\n", "t", "x"));                                         // version is required
+        THROWS(ProfileError, parse_os("[os]\nkind = bundle\nalpine_version = 3.24.3\nalpine_mirror = http://x\n", "t", "x"));   // https only
+        CHECK(parse_os("[os]\nkind = bundle\nalpine_version = 3.24.3\n", "t", "x").alpine_version == "3.24.3");
         THROWS(ProfileError, parse_profile("[profile]\nos = ../x\n", "t"));                // names become file names
         CHECK((parse_profile("[libs]\nuse = python3 git\nuse = nvim\n", "t").lib_use == Strings{"python3", "git", "nvim"}));
         OsDef o = parse_os("[os]\nkind = host\nid = Debian\nversion = 12\n[files.x86_64.py.thon]\nbind = /a\nbind = /b\n", "t", "debian-12");
@@ -370,6 +379,7 @@ int main() {
         CHECK(pa.rootfs == pb.rootfs && pa.home != pb.home);                               // userland shared, $HOME never
         CHECK(bundle_spec(p) == bundle_spec(q) && bundle_spec(p) != bundle_spec(y));       // provision is per profile; version/packages are the OS's
         THROWS(Error, make_paths(u, "x", "../escape"));
+        THROWS(Error, bundle_ensure(p, u, pa, false, true));                               // print/check never download: nothing set up yet
         THROWS(ProfileError, parse_profile("[bundle]\nalpine_version = 3.24.3\n", "t"));   // moved to data/os
         THROWS(ProfileError, parse_profile("[bundle]\npackages = git\n", "t"));
         Profile no_os = parse_profile("[profile]\nname=n\nmode=bundle\ncommand=sh\n", "t");
@@ -415,6 +425,23 @@ int main() {
         Profile detect = parse_profile(head + "[libs]\nuse = shell\n", "t");              // no os pin and nothing matches this host
         detect.os.clear();
         THROWS(ProfileError, resolve_profile_data(detect, {r.d + "/nonexistent"}));
+    });
+
+    test("cli: option parsing", [] {
+        Cli c = parse_args("run", {"-y", "--net=pasta", "--cwd=/proj", "prof", "--", "sh", "-c", "echo --net=host -y"});
+        CHECK(c.cmd == "run" && c.yes && c.run.yes);
+        CHECK(c.run.net == NetMode::Pasta && c.run.cwd == fs::path("/proj"));
+        CHECK((c.pos == Strings{"prof"}));
+        CHECK((c.run.command == Strings{"sh", "-c", "echo --net=host -y"}));        // after `--` nothing is interpreted
+        Cli b = parse_args("run", {"p", "--refresh", "-v"});
+        CHECK(b.refresh && b.run.refresh && b.verbose && (b.pos == Strings{"p"}) && b.run.command.empty());
+        CHECK(parse_args("libs", {"--check", "debian-12"}).check);
+        Cli n = parse_args("print", {"-n", "--no-cwd", "--wg=/x.conf", "p"});
+        CHECK(n.run.dry && n.run.no_cwd && n.run.wg_conf == std::string("/x.conf"));
+        for (const char* net : {"none", "pasta", "host", "ivpn"}) CHECK(parse_args("run", {std::string("--net=") + net, "p"}).run.net.has_value());
+        THROWS(Error, parse_args("run", {"--bogus", "p"}));
+        THROWS(Error, parse_args("run", {"--net=bogus", "p"}));
+        CHECK(!handle_meta({"run"}).has_value());                                    // real commands are not meta commands
     });
 
     test("xauth file format", [] {

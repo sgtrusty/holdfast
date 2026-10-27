@@ -2,8 +2,10 @@
 
 **Profile**: an INI file describing one sandbox (`docs/PROFILE_REFERENCE.md`). It is found by name in
 `$HOLDFAST_PROFILES`, `~/.config/holdfast/profiles/`, `/etc/holdfast/profiles/`, then the `profile/` directory of each
-data dir (`docs/DATA.md`), or passed as a path. Unknown sections and keys are errors. Examples ship in `data/profile/`;
-copy one with `holdfast init NAME > ~/.config/holdfast/profiles/NAME.profile`.
+data dir (`docs/DATA.md`), or passed as a path. Unknown sections and keys are errors. The data that ships with holdfast
+(`data/profile`, `data/lib`, `data/os`) is found next to the binary: in a checkout, or under `/opt/holdfast` after
+`predep install`, so the example profiles run by name with nothing to copy. `holdfast list -v` shows what is visible and
+where it came from; to customise one, copy its file into `~/.config/holdfast/profiles/` and edit it.
 
 ## Userland modes
 
@@ -15,9 +17,13 @@ copy one with `holdfast init NAME > ~/.config/holdfast/profiles/NAME.profile`.
 
   Anything not listed does not exist.
 - **`mode = bundle`**: the userland is a private Alpine minirootfs, `~/.local/share/holdfast/bundles/<os>/rootfs`,
-  shared by every profile that names the same `os`. It is downloaded over HTTPS, sha256-verified (pin it in the `data/os`
-  file), extracted unprivileged, then provisioned (`apk add`, your `provision` lines) in a network-enabled writable stage.
-  Day-to-day runs mount it read-only.
+  shared by every profile that names the same `os`. There is no setup command: the first `holdfast run` creates it.
+  Everything that touches the downloaded bytes runs inside sandboxes (no host process handles the tarball): a throwaway
+  network-restricted sandbox downloads it over HTTPS, checks the sha256 (pin it in the `data/os` file) and extracts it,
+  then a second one runs `apk add` and your `provision` lines. Day-to-day runs mount it read-only.
+  Changing the `data/os` file makes the next run refuse until you `holdfast run --refresh PROFILE` (rebuild; changes made
+  inside the userland are discarded). It is all plain folders: `holdfast doctor` prints the data directory; to remove a
+  userland or a profile's saved `$HOME`, delete its folder (`bundles/<os>/`, `profiles/<name>/`).
 
 ## Network
 

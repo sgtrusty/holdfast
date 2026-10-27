@@ -35,8 +35,8 @@ Run `holdfast doctor` to see which optional features your host supports.
 
 | for | tools |
 |---|---|
-| `mode = pasta`, and `bundle setup` | `pasta` (package `passt`) |
-| bundle mode | `curl tar sha256sum` |
+| `mode = pasta`, and setting up a bundle profile | `pasta` (package `passt`) |
+| bundle mode (first run) | `curl tar gzip sha256sum` (they run inside a sandbox, the binaries come from the host) |
 | `mode = ivpn` | `ip iptables wg-quick wg ping sudo setpriv` |
 | nested display | `Xephyr` |
 | clipboard bridge | `xclip` or `wl-copy` |
