@@ -20,10 +20,12 @@ using namespace hf;
 static Profile load(const std::string& name, const Strings& extra) {
     std::string home;
     try { home = resolve_user().home.string(); } catch (...) { if (const char* h = std::getenv("HOME")) home = h; }
-    Profile p = load_profile_file(find_profile(name, home, extra));
+    const fs::path file = find_profile(name, home, extra);
+    Profile p = load_profile_file(file);
+    const bool by_path = name.find('/') != std::string::npos || (name.size() > 8 && name.substr(name.size() - 8) == ".profile");
     Strings roots = extra;
     for (const auto& d : p.data_dirs) if (std::find(roots.begin(), roots.end(), d) == roots.end()) roots.push_back(d);
-    for (const auto& d : data_roots(home)) if (std::find(roots.begin(), roots.end(), d) == roots.end()) roots.push_back(d);
+    for (const auto& d : data_roots(home, by_path ? profile_local_root(file) : "")) if (std::find(roots.begin(), roots.end(), d) == roots.end()) roots.push_back(d);
     if (!p.data_dirs.empty()) log::debug(cat("profile '", p.name, "' adds data roots: ", join(p.data_dirs, ", ")));
     resolve_profile_data(p, roots);                  // os file / library file lists the profile refers to (fails closed)
     return p;

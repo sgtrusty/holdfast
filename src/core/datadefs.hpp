@@ -57,9 +57,13 @@ bool valid_data_name(const std::string& n);                         // becomes a
 // "3.24.3" / "v3.24.3": an exact Alpine release (fetched by name, pinnable). Moving aliases (latest-stable, v3.24, edge) are not.
 // *branch receives "v3.24" on success.
 bool is_exact_alpine_release(const std::string& v, std::string* branch = nullptr);
-// Search order (first match wins): $HOLDFAST_DATA, $HOLDFAST_SHARE/data, ~/.config/holdfast/data, /etc/holdfast/data,
+// Search order (first match wins): $HOLDFAST_DATA, [the profile's own data dir], $HOLDFAST_SHARE/data, ~/.config/holdfast/data, /etc/holdfast/data,
 // then ONE shipped root: <dir of the binary>/../data (a checkout, or /opt/holdfast after install), else /opt/holdfast/data.
-Strings data_roots(const std::string& home);
+// A profile given by path (never by name) also gets <its directory>/data after $HOLDFAST_DATA; pass it as profile_root.
+Strings data_roots(const std::string& home, const std::string& profile_root = "");
+// <dir of the profile file>/data if it exists, else "". Throws PolicyError if it (or the profile) is group/world-writable
+// or the directory is a symlink leaving the profile's directory.
+std::string profile_local_root(const fs::path& profile_file);
 
 LibDef parse_lib(const std::string& text, const std::string& origin, const std::string& name);
 OsDef parse_os(const std::string& text, const std::string& origin, const std::string& name);

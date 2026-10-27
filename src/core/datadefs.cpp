@@ -38,9 +38,29 @@ bool is_exact_alpine_release(const std::string& v, std::string* branch) {
     return true;
 }
 
-Strings data_roots(const std::string& home) {
+std::string profile_local_root(const fs::path& profile_file) {
+    std::error_code ec;
+    const fs::path dir = fs::canonical(profile_file, ec).parent_path();
+    if (ec) return "";
+    const fs::path data = dir / "data";
+    if (!fs::exists(fs::symlink_status(data, ec))) return "";
+    // A repo's data is trusted shell (dep recipes, wm lines): it must not be rewritable by others, nor point elsewhere.
+    const fs::path real = fs::canonical(data, ec);
+    if (ec || !fs::is_directory(real, ec)) throw PolicyError(cat("refusing project data '", data.string(), "': not a directory"));
+    if (real.parent_path() != dir)
+        throw PolicyError(cat("refusing project data '", data.string(), "': it is a symlink leaving the profile's directory (", real.string(), ")"));
+    for (const fs::path& f : {real, fs::canonical(profile_file, ec)}) {
+        const auto perms = fs::status(f, ec).permissions();
+        if ((perms & (fs::perms::group_write | fs::perms::others_write)) != fs::perms::none)
+            throw PolicyError(cat("refusing project data: '", f.string(), "' is group/world-writable (chmod go-w it)"));
+    }
+    return real.string();
+}
+
+Strings data_roots(const std::string& home, const std::string& profile_root) {
     Strings r;
     if (const char* e = std::getenv("HOLDFAST_DATA"); e && *e) r.push_back(e);
+    if (!profile_root.empty()) r.push_back(profile_root);        // below --data/$HOLDFAST_DATA so a user can override a repo
     if (const char* e = std::getenv("HOLDFAST_SHARE"); e && *e) r.push_back(std::string(e) + "/data");
     if (!home.empty()) r.push_back(home + "/.config/holdfast/data");
     r.push_back("/etc/holdfast/data");
