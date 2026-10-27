@@ -42,7 +42,7 @@ Dependency direction (no cycles): `util` ‚Üê `core/{profile,paths,argbuilder}` ‚
 ## 3. CLI
 
 ```
-holdfast run [opts] PROFILE [-- CMD...]     holdfast bundle setup|shell|info|purge PROFILE [--force]
+holdfast run [opts] PROFILE [-- CMD...]     holdfast bundle setup|shell|info|purge PROFILE [--refresh]
 holdfast print|check PROFILE                holdfast net-test PROFILE | net-cleanup NAME
 holdfast purge PROFILE [-y]                 holdfast init [NAME] | list | doctor | version
 opts: --net=none|host|ivpn --wg=FILE --cwd=DIR --no-cwd -y -n/--dry-run -v

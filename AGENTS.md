@@ -38,6 +38,9 @@ The build is described in `premake5.lua`; `predep.toml` declares the `build`/`te
 | New bwrap flag | `ArgBuilder` (+ `pretty()` arity list) → `plan.cpp` → invariant test in `test_main.cpp` |
 | Firewall/netns change | `net/netns.cpp`; extend `NetNs::selftest`; re-run the stub lifecycle (below) |
 | New helper binary | add to `doctor()`; check with `which()` and give an actionable error |
+| New tool a minimal-libs profile can use | `data/lib/NAME.profile` (commands, sonames, paths, needs) → `holdfast libs --refresh` on each supported OS → commit the changed `data/os/*.profile`. No C++ change. |
+| New OS setup (bundle packages / pinned release, or a host distro lock) | `data/os/NAME.profile`; never inline version/packages in a profile. See `docs/DATA.md`. |
+| New key in a data file | `datadefs.cpp` (strict parse + `render_os` if it is written back) → `docs/DATA.md` → parser test |
 
 ## Testing netns changes without a VPN
 In a container/VM where you are root: put stub `wg-quick`/`wg` scripts first in `PATH` (the stub

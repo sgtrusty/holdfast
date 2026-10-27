@@ -4,6 +4,8 @@
 #include <cstdlib>
 
 #include "core/bundle.hpp"
+#include "core/datadefs.hpp"
+#include "core/libs_cmd.hpp"
 #include "core/session.hpp"
 #include "util/log.hpp"
 
@@ -24,13 +26,14 @@ USAGE
   holdfast run [options] PROFILE [-- COMMAND...]   run a sandbox
   holdfast print [options] PROFILE                 show the exact bwrap argv (no side effects)
   holdfast check PROFILE                           validate a profile
-  holdfast libs [--check] PROFILE                  print a [libs] block for `libs = minimal` (reads ELF headers; authoring only)
-  holdfast bundle setup|shell|info|purge PROFILE   manage the Alpine bundle   [--force]
+  holdfast libs [--check|--refresh] [OS]             generate/verify data/os/OS.profile: the resolved library files per OS for every data/lib
+                                                   (reads ELF headers of this host; authoring/CI only, never part of `run`)
+  holdfast bundle setup|shell|info|purge PROFILE   manage the Alpine bundle   [--refresh]
   holdfast net-test PROFILE                        bring up the netns and test the kill switch
   holdfast net-cleanup NAME                        remove a stale namespace (e.g. hf-librewolf)
   holdfast purge PROFILE [-y]                      delete ALL state of a profile (incl. fake $HOME)
   holdfast init [NAME]                             list/print example profiles
-  holdfast list                                    list known profiles
+  holdfast list [libs|os]                          list known profiles (or data/lib, data/os definitions)
   holdfast doctor                                  check host prerequisites
 
 RUN OPTIONS
@@ -39,15 +42,18 @@ RUN OPTIONS
   -y, --yes              don't ask before mounting    -n, --dry-run  same as `print`
   -v, --verbose          debug output
 
-PROFILE is a name (searched in $HOLDFAST_PROFILES, ~/.config/holdfast/profiles, /etc/holdfast/profiles)
-or a path to a .profile file.
+PROFILE is a name (searched in $HOLDFAST_PROFILES, ~/.config/holdfast/profiles, /etc/holdfast/profiles, then
+<data>/profile for each data dir) or a path to a .profile file. Data dirs ($HOLDFAST_DATA, ~/.config/holdfast/data,
+/etc/holdfast/data, <share>/data) hold lib/ (what a tool needs), os/ (OS setups and per-OS locks) and profile/.
 )", stderr);
 }
 
 static Profile load(const std::string& name) {
     std::string home;
     try { home = resolve_user().home.string(); } catch (...) { if (const char* h = std::getenv("HOME")) home = h; }
-    return load_profile_file(find_profile(name, home));
+    Profile p = load_profile_file(find_profile(name, home));
+    resolve_profile_data(p, data_roots(home));       // os file / lib locks the profile refers to (fails closed)
+    return p;
 }
 
 static bool confirm(const std::string& q, bool yes) {
@@ -60,8 +66,8 @@ static bool confirm(const std::string& q, bool yes) {
 static int cmd_init(const Strings& a) {
     namespace fs = std::filesystem;
     Strings dirs;
-    if (const char* e = std::getenv("HOLDFAST_SHARE")) dirs.push_back(std::string(e) + "/profiles");
-    dirs.push_back(std::string(HOLDFAST_SHARE_DIR) + "/profiles");
+    if (const char* e = std::getenv("HOLDFAST_SHARE")) dirs.push_back(std::string(e) + "/data/profile");
+    dirs.push_back(std::string(HOLDFAST_SHARE_DIR) + "/data/profile");
     for (auto& d : dirs) {
         if (!fs::is_directory(d)) continue;
         if (a.empty()) {
@@ -75,12 +81,33 @@ static int cmd_init(const Strings& a) {
     return 1;
 }
 
-static int cmd_list() {
+static int cmd_list(const Strings& a) {
     namespace fs = std::filesystem;
+    std::string home;
+    try { home = resolve_user().home.string(); } catch (...) {}
+    const Strings roots = data_roots(home);
+    if (!a.empty() && a[0] == "libs") {
+        for (const auto& n : list_data(roots, "lib")) {
+            try { LibDef d = load_lib(n, roots); std::printf("%-20s %s\n", n.c_str(), d.description.c_str()); }
+            catch (const Error& ex) { std::printf("%-20s INVALID  %s\n", n.c_str(), ex.what()); }
+        }
+        return 0;
+    }
+    if (!a.empty() && a[0] == "os") {
+        for (const auto& n : list_data(roots, "os")) {
+            try {
+                OsDef o = load_os(n, roots);
+                std::printf("%-20s %-7s %s\n", n.c_str(), o.kind == OsKind::Host ? "host" : "bundle", o.description.c_str());
+            } catch (const Error& ex) { std::printf("%-20s INVALID  %s\n", n.c_str(), ex.what()); }
+        }
+        return 0;
+    }
+    if (!a.empty()) throw Error("usage: holdfast list [libs|os]");
     Strings dirs;
     if (const char* e = std::getenv("HOLDFAST_PROFILES")) dirs.push_back(e);
-    try { dirs.push_back((resolve_user().home / ".config/holdfast/profiles").string()); } catch (...) {}
+    if (!home.empty()) dirs.push_back(home + "/.config/holdfast/profiles");
     dirs.push_back("/etc/holdfast/profiles");
+    for (const auto& r : roots) dirs.push_back(r + "/profile");
     for (auto& d : dirs) {
         if (!fs::is_directory(d)) continue;
         for (auto& e : fs::directory_iterator(d)) {
@@ -106,12 +133,12 @@ int main(int argc, char** argv) {
     try {
         if (cmd == "doctor") return doctor();
         if (cmd == "init") return cmd_init(args);
-        if (cmd == "list") return cmd_list();
+        if (cmd == "list") return cmd_list(args);
 
         // generic option scan (stops at `--`)
         RunOptions o;
         std::string sub;
-        bool force = false, yes = false, check_libs = false;
+        bool refresh = false, yes = false, check_libs = false;   // --refresh: rebuild a bundle / rewrite an OS file list from the current definitions
         Strings pos;
         size_t i = 0;
         for (; i < args.size(); ++i) {
@@ -121,7 +148,7 @@ int main(int argc, char** argv) {
             else if (a == "-y" || a == "--yes") { o.yes = true; yes = true; }
             else if (a == "-n" || a == "--dry-run") o.dry = true;
             else if (a == "--no-cwd") o.no_cwd = true;
-            else if (a == "--force") force = true;
+            else if (a == "--refresh") refresh = true;
             else if (a == "--check") check_libs = true;
             else if (a.rfind("--net=", 0) == 0) {
                 std::string m = a.substr(6);
@@ -136,6 +163,10 @@ int main(int argc, char** argv) {
         }
         for (; i < args.size(); ++i) o.command.push_back(args[i]);
 
+        if (cmd == "libs") {
+            if (pos.size() > 1 || (check_libs && refresh)) throw Error("usage: holdfast libs [--check|--refresh] [OS]");
+            return cmd_libs(pos.empty() ? "" : pos[0], check_libs, refresh);
+        }
         if (cmd == "net-cleanup") {
             if (pos.size() != 1) throw Error("usage: holdfast net-cleanup NAME");
             net_cleanup(pos[0]);
@@ -162,7 +193,7 @@ int main(int argc, char** argv) {
                 return 0;
             }
             struct Tmp { fs::path d; ~Tmp() { std::error_code ec; fs::remove_all(d, ec); } } t{make_session_dir(u, paths, p.name)};
-            if (sub == "setup") { bundle_setup(p, u, paths, t.d, force); return 0; }
+            if (sub == "setup") { bundle_setup(p, u, paths, t.d, refresh); return 0; }
             if (sub == "shell") return bundle_shell(p, u, paths, t.d);
             throw Error("unknown bundle subcommand: " + sub);
         }
@@ -183,7 +214,6 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "profile '%s' OK\n", p.name.c_str());
             return 0;
         }
-        if (cmd == "libs") return print_libs(p, check_libs);
         if (cmd == "net-test") return net_test(p, o);
         if (cmd == "purge") {
             User u = resolve_user();

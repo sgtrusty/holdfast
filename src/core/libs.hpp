@@ -1,24 +1,19 @@
-// holdfast - `libs = minimal`: bind only the shared libraries the allowed binaries actually need
+// holdfast - authoring-time dependency analysis for data/lib/*.profile (used by `holdfast libs`, never by `run`)
 #pragma once
 #include <utility>
 
+#include "core/datadefs.hpp"
 #include "core/paths.hpp"
 
 namespace hf {
 
-struct MinimalLibs {
-    // {host source, sandbox destination}, parents before children. Read-only binds.
-    std::vector<std::pair<fs::path, fs::path>> binds;
-};
-
-// AUTHORING TIME ONLY (`holdfast libs PROFILE`); `run` never calls this. Its output is pasted into the
-// profile's [libs] section, which is all `libs = minimal` binds at run time.
-// `bins`: {command name, canonical host path} of every binary the profile allows.
-// Resolves DT_NEEDED transitively by reading ELF headers (nothing is executed), then adds a small
-// built-in map of data/plugin directories that are loaded without being linked (python stdlib,
-// git-core helpers, nvim runtime, NSS modules, ...).
-// Fails closed: an unresolvable library or a toolchain command throws an Error that names the
-// `libs = full` toggle.
-MinimalLibs resolve_minimal_libs(const std::vector<std::pair<std::string, fs::path>>& bins, const Policy& pol);
+// Resolves ONE lib definition on THIS host to the files that must be bound read-only into a sandbox:
+// {host source, sandbox destination}, sorted by destination so parents come before children.
+//  - commands: found on PATH; their DT_NEEDED closure and PT_INTERP are read from the ELF headers (nothing is executed)
+//  - sonames:  globs searched in the loader's library directories (ld.so.conf + standard dirs), plus their closure
+//  - paths:    data/plugin directories (globs) bound whole; ELF files inside are scanned for what THEY link against
+// The result is what `holdfast libs` writes into data/os/*.profile. Fails closed: an unresolvable library or a
+// toolchain command (gcc, rustc, ... need crt files and static archives) throws an Error naming `libs = full`.
+std::vector<std::pair<fs::path, fs::path>> resolve_lib(const LibDef& def, const Policy& pol);
 
 }  // namespace hf

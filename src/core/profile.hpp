@@ -29,6 +29,7 @@ struct Profile {
     bool new_session = true;       // only used when the terminal is not proxied (see `terminal`)
     TermMode terminal = TermMode::Filter;   // pty proxy that strips dangerous escape sequences
     bool disable_userns = true;
+    std::string os;                // data/os/NAME.os: bundle profiles (required) name their shared userland; host profiles may pin a lock
     std::string seccomp = "default";   // "default" (built-in filter) | "none" | path to a compiled BPF file
     CwdMode cwd = CwdMode::Ask;
     std::string cwd_dest = "/shared";
@@ -40,7 +41,8 @@ struct Profile {
     bool fs_defaults = true;
     LibsMode libs = LibsMode::Minimal;
     std::vector<MountSpec> mounts;
-    Strings lib_binds;             // [libs] bind: explicit list used by `libs = minimal` (see `holdfast libs`)
+    Strings lib_use;               // [libs] use: data/lib/*.lib names this profile needs (libs = minimal)
+    Strings lib_binds;             // NOT parsed: filled by resolve_profile_data() from lib_use + the OS lock
     Strings tmpfs;
     Strings extra_deny;
 
@@ -74,8 +76,9 @@ struct Profile {
     bool git_protect = true;
     Strings font_families;
 
-    // [bundle]
-    std::string bundle_id;         // shared userland identity; empty => the profile name
+    // [bundle] provision is per profile. Everything else below is NOT parsed from the profile: it comes from
+    // the profile's data/os file (bundle kind) via resolve_profile_data(), so one OS setup is declared once.
+    std::string bundle_id;         // = the os name; every profile naming the same os shares one userland
     std::string alpine_version = "latest-stable";
     std::string alpine_mirror = "https://dl-cdn.alpinelinux.org/alpine";
     std::string alpine_sha256;     // optional pin of the minirootfs tarball

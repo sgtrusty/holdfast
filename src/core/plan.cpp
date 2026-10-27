@@ -99,13 +99,14 @@ void bind_resolv_conf(ArgBuilder& b, const PlanCtx& c) {
     }
 }
 
-// `libs = minimal`: bind exactly the profile's [libs] list. Nothing is analysed at run time; the list is
-// produced once by `holdfast libs PROFILE` and reviewed/committed like the rest of the profile.
+// `libs = minimal`: bind exactly the files resolve_profile_data() took from the OS's saved file list for the
+// libs this profile `use`s. Nothing is analysed at run time; the list is created once per OS by
+// `holdfast libs --refresh` and committed under data/os/.
 void mount_listed_libs(ArgBuilder& b, const Profile& p, const PlanCtx& c) {
     if (p.lib_binds.empty()) {
         if (!p.bins.empty())
-            throw ProfileError(cat("libs = minimal needs a [libs] list: generate one with `holdfast libs ", p.name,
-                                   "` and paste it into the profile, or set `libs = full` in [fs]"));
+            throw ProfileError(cat("libs = minimal resolved no library files for '", p.name, "': list the libs you need under [libs] use = ..., "
+                                   "or set `libs = full` in [fs]"));
         return;
     }
     Strings sorted = p.lib_binds;
@@ -113,8 +114,8 @@ void mount_listed_libs(ArgBuilder& b, const Profile& p, const PlanCtx& c) {
     for (const std::string& l : sorted) {
         std::error_code ec;
         if (!fs::exists(l, ec))
-            throw Error(cat("[libs] entry does not exist on this host: ", l, " (profile written for another system? re-run `holdfast libs ",
-                            p.name, "`, or set `libs = full`)"));
+            throw Error(cat("library file listed for this OS no longer exists on this host: ", l, " (the saved file list is out of date, e.g. after an upgrade): "
+                            "run `holdfast libs --check` to see what changed, `holdfast libs --refresh` to update it, or set `libs = full`"));
         c.policy->check_bind(l, false);
         b.ro_bind(canon(l), l);
     }

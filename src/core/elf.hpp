@@ -17,4 +17,9 @@ struct ElfDeps {
 // Reads the file only; nothing is executed (unlike ldd).
 std::optional<ElfDeps> read_elf_deps(const fs::path& file);
 
+// (ELF class << 16) | e_machine for any ELF file (32/64-bit, either endianness), nullopt for non-ELF or unreadable
+// files. The dynamic loader silently skips libraries of another ABI and keeps searching (a 32-bit libc.so.6 in
+// /usr/lib32 must not shadow the 64-bit one); the lock analysis has to do the same.
+std::optional<unsigned> elf_abi(const fs::path& file);
+
 }  // namespace hf

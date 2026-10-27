@@ -9,7 +9,7 @@ namespace hf {
 
 // Persistent layout (all under the target user's data dir, never system-wide):
 //   <data>/cache/alpine/<arch>/...      downloaded minirootfs tarballs
-//   <data>/bundles/<id>/rootfs          bundle userland, shared by every profile with `[bundle] id = <id>`
+//   <data>/bundles/<id>/rootfs          bundle userland, shared by every profile with `[profile] os = <id>`
 //   <data>/bundles/<id>/spec.stamp      hash of version|mirror|sha256 the rootfs was built from
 //   <data>/bundles/<id>/tarball.sha256  sha256 of the verified minirootfs tarball
 //   <data>/profiles/<name>/home         persistent fake $HOME (never shared)

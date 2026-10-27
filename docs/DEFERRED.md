@@ -51,14 +51,22 @@ checks (resize, Ctrl-C, mouse, exit) with `lazyvim` and `lazygit-dev`. Specific 
 
 ## Libraries and bundles
 
-- `[libs]` lists are host-specific (distro, arch, versions). They go stale after upgrades: run
-  `holdfast libs --check PROFILE` (planned follow-up: let hand-added entries be marked intentional so they do not fail the check).
-- Dependency analysis is `DT_NEEDED` only; libraries loaded with `dlopen` rely on the small built-in map in
-  `src/core/libs.cpp` or on explicit `[fs]` entries. Toolchains (`gcc`, `rustc`, `cargo`, ...) need `libs = full`.
-- Bundles are Alpine only. The shared-id mechanism is not Alpine-specific, but no other distro is fetched or verified.
-- The Alpine tarball hash comes from the same mirror unless you pin `alpine_sha256` in the profile; GPG verification is not implemented.
-- `provision` lines run with a shared rootfs writable; keep them to `$HOME` (packages go in `packages`).
-- Bundles installed before `bundles/<id>` existed (old `profiles/<name>/rootfs`) must be set up again.
+- **No per-OS file lists are shipped.** `data/os` has the Alpine bundle definition but no host file lists: the first
+  minimal-libs run on a distro tells you to create one (`HOLDFAST_DATA=./data holdfast libs --refresh`). A list must be
+  created on each supported distro/architecture and committed; CI should run `holdfast libs --check` per supported OS.
+  Until then the shipped example profiles use `libs = full`.
+- **The file list can still go stale, just in one place instead of in every profile.** After an upgrade
+  `holdfast libs --check` shows a `+`/`-` diff and a run fails closed on a listed file that no longer exists. Open
+  follow-up: a way to mark hand-added entries as intentional (today `libs --refresh` rescans and drops them; add the file
+  to a lib's `paths`/`sonames` instead).
+- Dependency analysis is `DT_NEEDED` only; anything loaded with `dlopen` must be declared in the lib's `paths`/`sonames`
+  (see `data/lib/*.profile`). Toolchains (`gcc`, `rustc`, `cargo`, ...) need `libs = full`.
+- The lib/os/profile files use the INI-style syntax; TOML is a later rename, not a redesign.
+- Bundles are Alpine only. The shared `os` mechanism is not Alpine-specific, but no other distro is fetched or verified.
+- The Alpine tarball hash comes from the same mirror unless you pin `alpine_sha256` in the `data/os` file; GPG verification is not implemented.
+- `provision` lines run with a shared rootfs writable; keep them to `$HOME` (packages go in the `data/os` file).
+- Bundles installed before `bundles/<id>` existed (old `profiles/<name>/rootfs`) must be set up again, and a bundle
+  profile needs `os = NAME` now (the inline `[bundle]` version/packages keys are rejected).
 
 ## Roadmap items still open
 

@@ -217,10 +217,31 @@ int main() {
         fs::remove_all(d);
     });
 
-    test("minimal libs: toolchains need libs = full", [] {
+    test("libs analysis: toolchains need libs = full, ELF closure of a real command", [] {
         User u = fake_user();
         Policy pol(u, {});
-        THROWS(Error, resolve_minimal_libs({{"gcc", "/usr/bin/gcc"}}, pol));
+        LibDef tc;
+        tc.name = "toolchain"; tc.commands = {"gcc"};
+        THROWS(Error, resolve_lib(tc, pol));                                  // crt files / static archives are not DT_NEEDED
+        if (which("sh")) {
+            LibDef sh;
+            sh.name = "shell"; sh.commands = {"sh"};
+            try {
+                bool libc = false;
+                for (const auto& [src, dst] : resolve_lib(sh, pol)) {
+                    if (dst.filename().string().rfind("libc.", 0) == 0 && fs::exists(src)) libc = true;
+                    // never a library of another ABI (a 32-bit /usr/lib32/libc.so.6 must not shadow the 64-bit one)
+                    CHECK(elf_abi(src) == elf_abi("/proc/self/exe") || !elf_abi(src).has_value());
+                }
+                const auto e = read_elf_deps(fs::canonical(*which("sh")));
+                CHECK(libc || !e.has_value() || e->needed.empty());
+            } catch (const Error& ex) {
+                CHECK(!"resolve_lib(sh) must not throw on a normal host");
+                std::printf("  resolve_lib(sh): %s\n", ex.what());
+            }
+        }
+        CHECK(!elf_abi("/nonexistent").has_value());
+        CHECK(elf_abi("/proc/self/exe").has_value());
     });
 
     test("seccomp denylist", [] {
@@ -286,29 +307,114 @@ int main() {
         CHECK(clean.restore().find("1049") == std::string::npos && clean.restore().find("25") == std::string::npos);
     });
 
-    test("bundle sharing: layout and integrity", [] {
+    // ---- data files: data/lib, data/os ------------------------------------------------------------------
+    // A throwaway data root with two libs, a host OS (with a lock for THIS architecture) and a bundle OS.
+    struct DataRoot {
+        std::string d;
+        DataRoot() {
+            char tmpl[] = "/tmp/hf-data-XXXXXX";
+            d = mkdtemp(tmpl);
+            fs::create_directories(d + "/lib"); fs::create_directories(d + "/os");
+            write_file(d + "/lib/base.profile", "[lib]\nsonames = libc.so.*\n", 0644);
+            write_file(d + "/lib/shell.profile", "[lib]\ncommands = sh bash\n", 0644);
+            write_file(d + "/os/fakeos-1.profile",
+                       "[os]\nkind = host\nid = fakeos\nversion = 1\n"
+                       "[files." + host_arch() + ".base]\nbind = /usr/lib/libc.so.6\nbind = /usr/lib/ld.so\n"
+                       "[files." + host_arch() + ".shell]\nbind = /usr/lib/libc.so.6\nbind = /usr/lib/libtinfo.so.6\n", 0644);
+            write_file(d + "/os/alpine-x.profile",
+                       "[os]\nkind = bundle\nalpine_version = 3.24.3\nalpine_sha256 = " + std::string(64, 'a') + "\npackages = git curl\n", 0644);
+            write_file(d + "/os/alpine-y.profile", "[os]\nkind = bundle\nalpine_version = 3.23.0\npackages = git curl\n", 0644);
+        }
+        ~DataRoot() { std::error_code ec; fs::remove_all(d, ec); }
+    };
+
+    test("data files: parsing is strict", [] {
+        CHECK(parse_lib("[lib]\ncommands = a b\nneeds = base\npaths = /usr/lib/x*\n", "t", "x").commands.size() == 2);
+        THROWS(ProfileError, parse_lib("[lib]\nbogus = 1\n", "t", "x"));
+        THROWS(ProfileError, parse_lib("[lib]\npaths = relative\n", "t", "x"));
+        THROWS(ProfileError, parse_lib("[lib]\ncommands = ../evil\n", "t", "x"));
+        THROWS(ProfileError, parse_lib("[lib]\nname = other\n", "t", "x"));            // must match the file name
+        THROWS(ProfileError, parse_os("[os]\nid = a\n", "t", "x"));                      // kind is required
+        THROWS(ProfileError, parse_os("[os]\nkind = bundle\nid = a\n", "t", "x"));       // host-only key in a bundle
+        THROWS(ProfileError, parse_os("[os]\nkind = host\nid = a\nalpine_version = 3\n", "t", "x"));
+        THROWS(ProfileError, parse_os("[os]\nkind = host\nid = a\n[files.x86_64.b]\nbind = rel\n", "t", "x"));
+        THROWS(ProfileError, parse_os("[os]\nkind = bundle\nalpine_sha256 = zz\n", "t", "x"));
+        THROWS(ProfileError, parse_profile("[profile]\nos = ../x\n", "t"));                // names become file names
+        CHECK((parse_profile("[libs]\nuse = python3 git\nuse = nvim\n", "t").lib_use == Strings{"python3", "git", "nvim"}));
+        OsDef o = parse_os("[os]\nkind = host\nid = Debian\nversion = 12\n[files.x86_64.py.thon]\nbind = /a\nbind = /b\n", "t", "debian-12");
+        CHECK(o.id == "debian" && o.files["x86_64"]["py.thon"] == (Strings{"/a", "/b"}));
+        OsDef rt = parse_os(render_os(o), "t", "debian-12");                              // render_os round-trips
+        CHECK(rt.files == o.files && rt.id == o.id && rt.version == o.version);
+        CHECK(valid_data_name("python3") && !valid_data_name("../x") && !valid_data_name("A") && !valid_data_name(""));
+    });
+
+    test("data files: host detection and OS matching", [] {
+        DataRoot r;
+        write_file(r.d + "/os-release", "NAME=\"Fake OS\"\nID=fakeos\nVERSION_ID=\"1.2\"\n", 0644);
+        HostId h = read_host_id(r.d + "/os-release");
+        CHECK(h.id == "fakeos" && h.version == "1.2" && suggest_os_name(h) == "fakeos-1.2");
+        auto m = match_host_os({r.d}, h);                                                  // os version "1" matches host "1.2"
+        CHECK(m.has_value() && m->name == "fakeos-1");
+        CHECK(!match_host_os({r.d}, HostId{"otheros", "1"}).has_value());
+    });
+
+    test("data files: bundle profiles take the OS file, sharing and integrity", [] {
+        DataRoot r;
+        const std::string a = "[profile]\nname=one\nmode=bundle\ncommand=sh\nos=alpine-x\n";
+        Profile p = parse_profile(a, "t"), q = parse_profile("[profile]\nname=two\nmode=bundle\ncommand=sh\nos=alpine-x\n[bundle]\nprovision = echo hi\n", "t");
+        Profile y = parse_profile("[profile]\nname=three\nmode=bundle\ncommand=sh\nos=alpine-y\n", "t");
+        for (Profile* x : {&p, &q, &y}) resolve_profile_data(*x, {r.d});
+        CHECK(p.alpine_version == "3.24.3" && p.alpine_sha256 == std::string(64, 'a') && p.apk_packages == (Strings{"git", "curl"}) && p.bundle_id == "alpine-x");
         User u = fake_user();
-        Paths a = make_paths(u, "one", "alpine-dev"), b = make_paths(u, "two", "alpine-dev"), c = make_paths(u, "three");
-        CHECK(a.rootfs == b.rootfs && a.home != b.home);                       // userland shared, $HOME never
-        CHECK(c.bundle.filename() == "three");                                  // default id = profile name
+        Paths pa = make_paths(u, p.name, p.bundle_id), pb = make_paths(u, q.name, q.bundle_id);
+        CHECK(pa.rootfs == pb.rootfs && pa.home != pb.home);                               // userland shared, $HOME never
+        CHECK(bundle_spec(p) == bundle_spec(q) && bundle_spec(p) != bundle_spec(y));       // provision is per profile; version/packages are the OS's
         THROWS(Error, make_paths(u, "x", "../escape"));
-        THROWS(ProfileError, parse_profile("[bundle]\nid = ../x\n", "t"));
-        const char* base = "[profile]\nname=t\ncommand=sh\n[bundle]\nalpine_version=3.24.3\n";
-        Profile p = parse_profile(base, "t");
-        Profile q = parse_profile(std::string(base) + "packages = git\nprovision = echo hi\n", "t");
-        Profile r = parse_profile("[profile]\nname=t\ncommand=sh\n[bundle]\nalpine_version=3.23.0\n", "t");
-        CHECK(bundle_spec(p) == bundle_spec(q) && bundle_spec(p) != bundle_spec(r));   // packages/provision are additive, version is not
+        THROWS(ProfileError, parse_profile("[bundle]\nalpine_version = 3.24.3\n", "t"));   // moved to data/os
+        THROWS(ProfileError, parse_profile("[bundle]\npackages = git\n", "t"));
+        Profile no_os = parse_profile("[profile]\nname=n\nmode=bundle\ncommand=sh\n", "t");
+        THROWS(ProfileError, resolve_profile_data(no_os, {r.d}));                          // bundle profiles must name their os
+        Profile host_os = parse_profile("[profile]\nname=n\nmode=bundle\ncommand=sh\nos=fakeos-1\n", "t");
+        THROWS(ProfileError, resolve_profile_data(host_os, {r.d}));                        // wrong kind
+        Profile missing = parse_profile("[profile]\nname=n\nmode=bundle\ncommand=sh\nos=nope\n", "t");
+        THROWS(ProfileError, resolve_profile_data(missing, {r.d}));
+        // integrity of the installed bundle
         char tmpl[] = "/tmp/hf-bun-XXXXXX";
         std::string d = mkdtemp(tmpl);
-        Paths bp = a; bp.bundle = d;
+        Paths bp = pa; bp.bundle = d;
         write_file(d + "/spec.stamp", bundle_spec(p) + "\n", 0600);
         write_file(d + "/tarball.sha256", std::string(64, 'a') + "\n", 0600);
-        bundle_verify(p, bp);                                                   // same spec: fine
-        THROWS(Error, bundle_verify(r, bp));                                    // another profile sharing the id with a different version
-        Profile pinned = parse_profile(std::string(base) + "alpine_sha256 = " + std::string(64, 'b') + "\n", "t");
-        write_file(d + "/spec.stamp", bundle_spec(pinned) + "\n", 0600);
-        THROWS(Error, bundle_verify(pinned, bp));                               // pins a different tarball than the one installed
+        bundle_verify(p, bp);                                                              // built from this os: fine
+        bundle_verify(q, bp);                                                              // ... also for the other profile sharing it
+        THROWS(Error, bundle_verify(y, bp));                                               // a different os definition under the same bundle dir
+        write_file(d + "/tarball.sha256", std::string(64, 'c') + "\n", 0600);
+        THROWS(Error, bundle_verify(p, bp));                                               // installed tarball differs from the pinned hash
         fs::remove_all(d);
+    });
+
+    test("data files: host profiles resolve libs through the OS file list", [] {
+        DataRoot r;
+        const std::string head = "[profile]\nname=t\ncommand=sh\nos=fakeos-1\n[bin]\nallow = sh\n";
+        Profile p = parse_profile(head + "[libs]\nuse = shell\n", "t");
+        resolve_profile_data(p, {r.d});
+        CHECK((p.lib_binds == Strings{"/usr/lib/ld.so", "/usr/lib/libc.so.6", "/usr/lib/libtinfo.so.6"}));   // base + shell, deduplicated, sorted
+        Profile full = parse_profile(head + "[fs]\nlibs = full\n", "t");
+        resolve_profile_data(full, {r.d});
+        CHECK(full.lib_binds.empty());                                                     // full needs no lock
+        Profile uncovered = parse_profile("[profile]\nname=t\ncommand=sh\nos=fakeos-1\n[bin]\nallow = sh ls\n[libs]\nuse = shell\n", "t");
+        THROWS(ProfileError, resolve_profile_data(uncovered, {r.d}));                      // `ls` is provided by no used lib
+        Profile nouse = parse_profile(head, "t");
+        THROWS(ProfileError, resolve_profile_data(nouse, {r.d}));                          // sh is not covered without `use`
+        Profile unknown = parse_profile(head + "[libs]\nuse = nosuchlib\n", "t");
+        THROWS(ProfileError, resolve_profile_data(unknown, {r.d}));
+        write_file(r.d + "/lib/extra.profile", "[lib]\ncommands = ls\n", 0644);               // a lib with no lock section in the OS file
+        Profile nolock = parse_profile(head + "[libs]\nuse = shell extra\n", "t");
+        THROWS(ProfileError, resolve_profile_data(nolock, {r.d}));
+        Profile wrong = parse_profile("[profile]\nname=t\ncommand=sh\nos=alpine-x\n[bin]\nallow = sh\n[libs]\nuse = shell\n", "t");
+        THROWS(ProfileError, resolve_profile_data(wrong, {r.d}));                          // a bundle os is not a host os
+        Profile detect = parse_profile(head + "[libs]\nuse = shell\n", "t");              // no os pin and nothing matches this host
+        detect.os.clear();
+        THROWS(ProfileError, resolve_profile_data(detect, {r.d + "/nonexistent"}));
     });
 
     test("xauth file format", [] {
@@ -352,16 +458,17 @@ int main() {
         CHECK(has_seq(pl2.b.args(), {"--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"}));
         CHECK(!has_seq(pl2.b.args(), {"--uid"}));
         CHECK(has_seq(a, {"--ro-bind", "/usr/lib", "/usr/lib"}));    // libs = full above binds the directories
-        // libs = minimal: exactly the [libs] list, and an empty list with binaries is an error
+        // libs = minimal: exactly the files resolve_profile_data() took from the OS lock, and none with binaries is an error
         std::string lib = d + "/libfoo.so.1";
         write_file(lib, "x", 0644);
-        Profile m = parse_profile("[profile]\nname=t\ncommand=sh\n[bin]\nallow = sh\n[libs]\nbind = " + lib + "\n[home]\nuser=box\n", "t");
+        Profile m = parse_profile("[profile]\nname=t\ncommand=sh\n[bin]\nallow = sh\n[home]\nuser=box\n", "t");
+        m.lib_binds = {lib};
         Plan pm = build_plan(m, c);
         CHECK(has_seq(pm.b.args(), {"--ro-bind", fs::canonical(lib).string(), lib}));
         CHECK(!has_seq(pm.b.args(), {"--ro-bind", "/usr/lib", "/usr/lib"}));
         Profile e = parse_profile("[profile]\nname=t\ncommand=sh\n[bin]\nallow = sh\n[home]\nuser=box\n", "t");
         THROWS(ProfileError, build_plan(e, c));
-        THROWS(ProfileError, parse_profile("[libs]\nbind = relative/path\n", "t"));
+        THROWS(ProfileError, parse_profile("[libs]\nbind = /usr/lib/libc.so.6\n", "t"));   // concrete paths no longer belong in profiles
 #ifdef HOLDFAST_HAVE_SECCOMP
         CHECK(pl.seccomp == c.session / "seccomp.bpf" && fs::exists(pl.seccomp));
 #endif

@@ -9,20 +9,15 @@
 name        = lazygit-dev
 description = lazygit test build in a private Alpine bundle
 mode        = bundle
+# The userland (Alpine release, pinned hash, package list) is declared once in data/os/alpine-3.24-dev.profile and
+# shared by every profile that names it; holdfast refuses to run a bundle built from a different version of that file.
+os          = alpine-3.24-dev
 command     = lazygit
 cwd         = ask
 new_session = no
 
 [bundle]
-# Profiles with the same id share ONE userland (<data>/bundles/<id>/rootfs). They must agree on
-# alpine_version/alpine_mirror/alpine_sha256; holdfast refuses to run or set up a bundle whose recorded
-# spec differs ("holdfast bundle info NAME" shows the check). Packages and provision lines stay per profile.
-id = alpine-dev
-# Exact release + pinned hash: nothing moves under you (latest-stable and branch names are moving targets).
-alpine_version = 3.24.3
-alpine_sha256 = f8e1cafba9b1b283b5d30d06f9885c8d2bc161ffe9083ade8e2e157813a53407
-packages = ca-certificates build-base git bash curl go rust cargo
-# Run once, with network, as userns-root inside the bundle. HOME=/home/sandbox is persistent.
+# Per-profile only. Run once, with network, as userns-root inside the bundle. HOME=/home/sandbox is persistent.
 provision = go install github.com/jesseduffield/lazygit@sh-integration
 provision = cargo install --git https://github.com/stefanhaller/delta.git --branch osc-1717-metadata --root /home/sandbox/go
 provision = git clone --depth 1 --branch osc-1717-metadata https://github.com/stefanhaller/difftastic.git /tmp/difft && cargo install --path /tmp/difft --root /home/sandbox/go

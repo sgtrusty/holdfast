@@ -10,6 +10,7 @@
 #include <sstream>
 
 #include "core/elf.hpp"
+#include "util/log.hpp"
 #include "util/sys.hpp"
 
 namespace hf {
@@ -19,27 +20,6 @@ namespace {
 // Commands whose job is linking/compiling need crt files, libc.so linker scripts and static archives,
 // none of which are DT_NEEDED. Refuse early with a clear message instead of failing inside the sandbox.
 const std::set<std::string> kNeedsFull = {"gcc", "cc", "g++", "c++", "ld", "lld", "ld.lld", "clang", "clang++", "rustc", "cargo"};
-
-// Data/plugin directories a command loads at runtime (dlopen, imports, helper executables).
-// Globs allowed; paths that do not exist on this host are skipped. Extend per distro.
-const std::vector<std::pair<std::string, Strings>>& support_map() {
-    static const std::vector<std::pair<std::string, Strings>> m = {
-        {"git",     {"/usr/lib/git-core", "/usr/share/git-core"}},
-        {"python3", {"/usr/lib/python3*", "/usr/local/lib/python3*"}},
-        {"python",  {"/usr/lib/python3*", "/usr/local/lib/python3*"}},
-        {"pip",     {"/usr/lib/python3*", "/usr/local/lib/python3*"}},
-        {"nvim",    {"/usr/share/nvim", "/usr/lib/nvim"}},
-        {"vim",     {"/usr/share/vim"}},
-        {"node",    {"/usr/lib/node_modules", "/usr/share/nodejs"}},
-        {"npm",     {"/usr/lib/node_modules", "/usr/share/nodejs"}},
-        {"lua-language-server", {"/usr/lib/lua-language-server", "/usr/share/lua-language-server"}},
-    };
-    return m;
-}
-
-// glibc loads these with dlopen (name service switch, resolver, iconv, locales).
-const Strings kBaseSonames = {"libnss_files.so*", "libnss_dns.so*", "libresolv.so*"};
-const Strings kBaseDirs = {"/usr/lib/locale"};
 
 std::string triplet() {
     utsname u{};
@@ -84,6 +64,17 @@ const Strings& lib_dirs() {
     return v;
 }
 
+// The ABI of holdfast itself: libraries of another one (lib32 next to lib64) are never candidates.
+std::optional<unsigned> native_abi() {
+    static const std::optional<unsigned> v = elf_abi("/proc/self/exe");
+    return v;
+}
+bool abi_matches(const fs::path& p, const std::optional<unsigned>& want) {
+    if (!want) return true;
+    const auto got = elf_abi(p);
+    return got && *got == *want;
+}
+
 std::string replace_all(std::string s, const std::string& from, const std::string& to) {
     for (size_t p = 0; (p = s.find(from, p)) != std::string::npos; p += to.size()) s.replace(p, from.size(), to);
     return s;
@@ -117,12 +108,9 @@ struct Collector {
         add(parent / p.filename(), real);
     }
     void add_root(const fs::path& dir) {
-        std::error_code ec;
-        fs::path real = fs::canonical(dir, ec);
-        if (ec) return;
-        pol.check_bind(real, false);
-        roots.push_back(real);
-        binds[real.string()] = real;
+        pol.check_bind(dir, false);
+        roots.push_back(dir);
+        binds[dir.string()] = dir;
     }
     // ELF objects inside a bound directory: not bound again, but what they link against is.
     void scan(const fs::path& root) {
@@ -135,7 +123,8 @@ struct Collector {
             std::error_code e2;
             if (it->is_symlink(e2) || !it->is_regular_file(e2)) continue;
             const bool exec = (it->status(e2).permissions() & fs::perms::owner_exec) != fs::perms::none;
-            if (exec || it->path().filename().string().find(".so") != std::string::npos) enqueue(it->path());
+            if ((exec || it->path().filename().string().find(".so") != std::string::npos) && abi_matches(it->path(), native_abi()))
+                enqueue(it->path());
         }
         if (ec) throw Error(cat("cannot scan ", root.string(), ": ", ec.message()));
     }
@@ -147,6 +136,7 @@ struct Collector {
             if (s.find('$') == std::string::npos) dirs.push_back(s);       // $LIB/$PLATFORM: fall through to defaults
         }
         dirs.insert(dirs.end(), lib_dirs().begin(), lib_dirs().end());
+        const std::optional<unsigned> want = elf_abi(obj).has_value() ? elf_abi(obj) : native_abi();   // same ABI as the requester
         for (const std::string& name : e.needed) {
             std::optional<fs::path> found;
             if (name.find('/') != std::string::npos) found = fs::path(name);
@@ -154,7 +144,7 @@ struct Collector {
                 if (found) break;
                 std::error_code ec;
                 fs::path c = fs::path(d) / name;
-                if (fs::is_regular_file(c, ec)) found = c;
+                if (fs::is_regular_file(c, ec) && abi_matches(c, want)) found = c;     // like ld.so: skip wrong-ABI candidates, keep looking
             }
             if (!found)
                 throw Error(cat("cannot find ", name, " (needed by ", obj.string(), ") in the library search path; "
@@ -175,45 +165,42 @@ struct Collector {
 
 }  // namespace
 
-MinimalLibs resolve_minimal_libs(const std::vector<std::pair<std::string, fs::path>>& bins, const Policy& pol) {
-    for (const auto& [name, real] : bins)
-        if (kNeedsFull.count(name))
-            throw Error(cat("'", name, "' needs the host's development libraries (crt files, libc.so, static archives), "
-                            "which `libs = minimal` does not mount; set `libs = full` in [fs] for this profile"));
+std::vector<std::pair<fs::path, fs::path>> resolve_lib(const LibDef& d, const Policy& pol) {
+    for (const std::string& cmd : d.commands)
+        if (kNeedsFull.count(cmd))
+            throw Error(cat("lib '", d.name, "': '", cmd, "' needs the host's development libraries (crt files, libc.so, static archives), "
+                            "which a minimal lib set does not provide; remove it from the lib and use `libs = full` in profiles that need it"));
 
     Collector c(pol);
     VarCtx vc;
     std::vector<fs::path> support;
-    auto add_support = [&](const std::string& pattern) {
+    for (const std::string& pattern : d.paths)
         for (const std::string& s : expand_glob(pattern, vc)) {
             std::error_code ec;
             if (fs::exists(s, ec)) support.push_back(canon(s));
         }
-    };
-    for (const std::string& d : kBaseDirs) add_support(d);
-    for (const std::string& d : lib_dirs()) add_support(d + "/gconv");
-    for (const auto& [name, real] : bins)
-        for (const auto& [cmd, paths] : support_map())
-            if (cmd == name) for (const std::string& p : paths) add_support(p);
-
     for (const auto& s : support) {          // roots first so `covered()` is complete before any lib is added
         std::error_code ec;
         if (fs::is_directory(s, ec)) c.add_root(s);
         else { pol.check_bind(s, false); c.binds[s.string()] = s; }
     }
     for (const auto& s : support) c.scan(s);
-    for (const auto& [name, real] : bins) c.enqueue(real);
 
-    for (const std::string& pat : kBaseSonames)
-        for (const std::string& d : lib_dirs())
-            for (const std::string& m : expand_glob(d + "/" + pat, vc)) {
+    for (const std::string& cmd : d.commands) {
+        auto host = which(cmd);
+        if (!host) { log::warn(cat("lib '", d.name, "': command not found on this host, skipped: ", cmd)); continue; }
+        c.enqueue(canon(*host));
+    }
+    for (const std::string& pat : d.sonames)
+        for (const std::string& dir : lib_dirs())
+            for (const std::string& m : expand_glob(dir + "/" + pat, vc)) {
                 std::error_code ec;
-                if (fs::is_regular_file(m, ec)) c.add_found(m);
+                if (fs::is_regular_file(m, ec) && abi_matches(m, native_abi())) c.add_found(m);
             }
 
     c.run();
-    MinimalLibs out;
-    for (const auto& [dst, src] : c.binds) out.binds.emplace_back(src, dst);
+    std::vector<std::pair<fs::path, fs::path>> out;
+    for (const auto& [dst, src] : c.binds) out.emplace_back(src, dst);
     return out;
 }
 

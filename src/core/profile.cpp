@@ -2,39 +2,15 @@
 
 #include <regex>
 
+#include "core/datadefs.hpp"
+#include "core/ini.hpp"
 #include "util/sys.hpp"
 
 namespace hf {
 
 namespace {
 
-struct Line { std::string section, key, value; int no; };
-
-std::vector<Line> parse_ini(const std::string& text, const std::string& origin) {
-    std::vector<Line> out;
-    std::stringstream ss(text);
-    std::string raw, section;
-    int no = 0;
-    while (std::getline(ss, raw)) {
-        ++no;
-        std::string l = trim(raw);
-        if (l.empty() || l[0] == '#' || l[0] == ';') continue;
-        if (l.front() == '[') {
-            if (l.back() != ']') throw ProfileError(cat(origin, ":", no, ": malformed section header"));
-            section = lower(trim(l.substr(1, l.size() - 2)));
-            continue;
-        }
-        auto eq = l.find('=');
-        if (eq == std::string::npos) throw ProfileError(cat(origin, ":", no, ": expected key = value"));
-        if (section.empty()) throw ProfileError(cat(origin, ":", no, ": key outside any section"));
-        std::string val = l.substr(eq + 1);
-        // Inline comment: whitespace followed by '#'. (A '#' glued to text is data.)
-        for (size_t i = 0; i + 1 < val.size(); ++i)
-            if (std::isspace(static_cast<unsigned char>(val[i])) && val[i + 1] == '#') { val.erase(i); break; }
-        out.push_back({section, lower(trim(l.substr(0, eq))), trim(val), no});
-    }
-    return out;
-}
+using Line = IniLine;
 
 bool as_bool(const Line& l, const std::string& origin) {
     std::string v = lower(l.value);
@@ -79,6 +55,10 @@ Profile parse_profile(const std::string& text, const std::string& o) {
             }
             else if (k == "command") p.command = split_words(v);
             else if (k == "hostname") p.hostname = v;
+            else if (k == "os") {
+                if (!valid_data_name(v)) bad(l, o, "expected an os name (data/os/NAME.os)");
+                p.os = v;
+            }
             else if (k == "new_session") p.new_session = as_bool(l, o);
             else if (k == "disable_userns") p.disable_userns = as_bool(l, o);
             else if (k == "terminal") {
@@ -118,10 +98,15 @@ Profile parse_profile(const std::string& text, const std::string& o) {
             }
             else bad(l, o, "unknown key");
         } else if (s == "libs") {
-            if (k == "bind") {
-                if (!fs::path(v).is_absolute()) bad(l, o, "expected an absolute path");
-                p.lib_binds.push_back(v);
-            } else bad(l, o, "unknown key");
+            if (k == "use") {
+                Strings names;
+                append_words(names, v);
+                for (auto& n : names) if (!valid_data_name(n)) bad(l, o, "invalid lib name: " + n);
+                p.lib_use.insert(p.lib_use.end(), names.begin(), names.end());
+            }
+            else if (k == "bind") bad(l, o, "concrete paths no longer live in profiles: name the libs you need with `use = ...`; "
+                                            "the per-OS paths are generated into data/os/*.os by `holdfast libs`");
+            else bad(l, o, "unknown key");
         } else if (s == "home") {
             if (k == "user") p.fake_user = v;
             else if (k == "dirs") append_words(p.home_dirs, v);
@@ -189,16 +174,9 @@ Profile parse_profile(const std::string& text, const std::string& o) {
         } else if (s == "fonts") {
             if (k == "allow") append_words(p.font_families, v); else bad(l, o, "unknown key");
         } else if (s == "bundle") {
-            if (k == "id") {
-                static const std::regex id_ok("^[a-z0-9][a-z0-9._-]{0,63}$");   // becomes a directory name
-                if (!std::regex_match(v, id_ok)) bad(l, o, "expected [a-z0-9._-], at most 64 chars, not starting with . or -");
-                p.bundle_id = v;
-            }
-            else if (k == "alpine_version") p.alpine_version = v;
-            else if (k == "alpine_mirror") p.alpine_mirror = v;
-            else if (k == "alpine_sha256") p.alpine_sha256 = lower(v);
-            else if (k == "packages") append_words(p.apk_packages, v);
-            else if (k == "provision") p.provision.push_back(v);
+            if (k == "provision") p.provision.push_back(v);
+            else if (k == "id" || k == "alpine_version" || k == "alpine_mirror" || k == "alpine_sha256" || k == "packages")
+                bad(l, o, "moved out of profiles: declare the OS setup once in data/os/NAME.os (kind = bundle) and set [profile] os = NAME");
             else bad(l, o, "unknown key");
         } else {
             throw ProfileError(cat(o, ":", l.no, ": unknown section [", s, "]"));
@@ -213,8 +191,6 @@ Profile load_profile_file(const fs::path& path) {
     static const std::regex ok("^[a-z0-9][a-z0-9_-]{0,31}$");
     if (!std::regex_match(p.name, ok))
         throw ProfileError(path.string() + ": profile name must match [a-z0-9][a-z0-9_-]{0,31}");
-    if (!p.alpine_sha256.empty() && !is_hex(p.alpine_sha256, 64))
-        throw ProfileError(path.string() + ": [bundle] alpine_sha256 must be 64 hex chars");
     return p;
 }
 
@@ -227,6 +203,7 @@ fs::path find_profile(const std::string& n, const std::string& home) {
     if (const char* e = std::getenv("HOLDFAST_PROFILES")) cands.push_back(cat(e, "/", n, ".profile"));
     cands.push_back(cat(home, "/.config/holdfast/profiles/", n, ".profile"));
     cands.push_back(cat("/etc/holdfast/profiles/", n, ".profile"));
+    for (const auto& r : data_roots(home)) cands.push_back(cat(r, "/profile/", n, ".profile"));   // shipped/shared data dirs
     for (auto& c : cands) if (fs::is_regular_file(c)) return c;
     throw Error(cat("profile '", n, "' not found; searched:\n  ", join(cands, "\n  ")));
 }

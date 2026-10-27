@@ -33,6 +33,14 @@ std::string cstr(const std::string& tab, uint64_t off) {
 
 }  // namespace
 
+std::optional<unsigned> elf_abi(const fs::path& file) {
+    std::ifstream f(file, std::ios::binary);
+    unsigned char h[20];
+    if (!f || !f.read(reinterpret_cast<char*>(h), sizeof h) || std::memcmp(h, ELFMAG, SELFMAG) != 0) return std::nullopt;
+    const unsigned machine = h[EI_DATA] == ELFDATA2MSB ? (unsigned{h[18]} << 8 | h[19]) : (unsigned{h[19]} << 8 | h[18]);
+    return (unsigned{h[EI_CLASS]} << 16) | machine;
+}
+
 std::optional<ElfDeps> read_elf_deps(const fs::path& file) {
     Reader r(file);
     if (!r.f) throw Error("cannot open " + file.string());

@@ -73,7 +73,7 @@ Looked up by name in `$HOLDFAST_PROFILES`, `~/.config/holdfast/profiles/`,
 Examples live in `profiles/`; `holdfast init NAME > ~/.config/holdfast/profiles/NAME.profile`.
 
 **Userland modes**
-- `mode = host` – a tmpfs root is assembled from: the library files listed in the profile's `[libs]` section (`libs = minimal`, default; generate the list with `holdfast libs PROFILE`; `libs = full` binds `/usr/lib*` read-only instead), each binary in `[bin] allow` bound individually at `/usr/bin/<name>`, plus the files you list in `[fs]`. Anything not listed does not exist.
+- `mode = host` – a tmpfs root is assembled from: the library files of the `[libs] use` set, taken from the per-OS lock in `data/os` (`libs = minimal`, default; generate/verify locks with `holdfast libs`; `libs = full` binds `/usr/lib*` read-only instead), each binary in `[bin] allow` bound individually at `/usr/bin/<name>`, plus the files you list in `[fs]`. Anything not listed does not exist.
 - `mode = bundle` – the userland is `~/.local/share/holdfast/profiles/<name>/rootfs`, an Alpine minirootfs downloaded over HTTPS, sha256-verified (optionally pinned), extracted unprivileged, then provisioned (`apk add`, your `provision` lines) in a network-enabled, writable stage. Day-to-day runs mount it read-only.
 
 **Network** – `none` (default, fresh empty netns), `pasta` (private netns with outbound internet; host loopback and abstract sockets unreachable), `host` (shares the host netns, **including abstract unix sockets such as X11**; avoid), or `ivpn` (WireGuard inside `hf-<profile>`, see below).

@@ -17,9 +17,11 @@ std::string provision_stamp(const Profile& p) {
                           join(p.apk_packages, " "), "|", join(p.provision, "\n")));
 }
 
-// Packages and provision lines are deliberately NOT part of the spec: they are additive per profile.
+// Everything the OS file declares (version, mirror, pinned hash, packages). Provision lines are per profile
+// and are not part of it. All profiles naming the same os read the same file, so a mismatch means the file
+// changed after the bundle was built (or two data directories define the same os name differently).
 std::string bundle_spec(const Profile& p) {
-    return sha256_str(cat(p.alpine_version, "|", p.alpine_mirror, "|", p.alpine_sha256));
+    return sha256_str(cat(p.alpine_version, "|", p.alpine_mirror, "|", p.alpine_sha256, "|", join(p.apk_packages, " ")));
 }
 
 static std::string bundle_label(const Profile& p, const Paths& paths) { return paths.bundle.filename().string() + (p.bundle_id.empty() ? "" : " (shared)"); }
@@ -30,11 +32,10 @@ void bundle_verify(const Profile& p, const Paths& paths) {
     try { tar = trim(read_file(paths.bundle / "tarball.sha256")); } catch (...) {}
     const std::string id = bundle_label(p, paths);
     if (have.empty())
-        throw Error(cat("bundle '", id, "' has no spec.stamp (not built by this holdfast?); run: holdfast bundle setup ", p.name, " --force"));
+        throw Error(cat("bundle '", id, "' has no spec.stamp (not built by this holdfast?); run: holdfast bundle setup ", p.name, " --refresh"));
     if (have != bundle_spec(p))
-        throw Error(cat("bundle '", id, "' was built from a different alpine_version/alpine_mirror/alpine_sha256 than profile '", p.name,
-                        "' declares. Profiles that share a bundle id must agree: align them, give this profile its own [bundle] id, "
-                        "or rebuild for everyone with: holdfast bundle setup ", p.name, " --force"));
+        throw Error(cat("bundle '", id, "' was built from a different data/os/", id, ".os (version, mirror, sha256 or packages) than the one now in use. "
+                        "Rebuild it for every profile that shares it with: holdfast bundle setup ", p.name, " --refresh"));
     if (!p.alpine_sha256.empty() && tar != p.alpine_sha256)
         throw Error(cat("bundle '", id, "' was built from tarball ", tar, " but profile '", p.name, "' pins ", p.alpine_sha256));
 }
@@ -155,7 +156,7 @@ void bundle_setup(const Profile& p, const User& u, const Paths& paths, const fs:
         std::error_code ec;
         fs::remove(paths.state / "provision.stamp", ec);
     } else {
-        log::info("bundle already extracted (use --force to rebuild)");
+        log::info("bundle already extracted (use --refresh to rebuild)");
     }
     if (!force && bundle_provisioned(p, paths)) { log::info("bundle is up to date"); return; }
 
