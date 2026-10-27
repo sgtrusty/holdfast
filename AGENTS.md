@@ -2,6 +2,9 @@
 
 holdfast is a **security tool**. When in doubt, be stricter, not more convenient.
 
+> This file is for changing holdfast. If you only want to *use* it from another project (run a command, an editor or an
+> agent inside a sandbox), read `docs/INTEGRATION.md` instead: run the CLI as a subprocess, do not link it.
+
 ## Build / test (run all of these before declaring work done)
 ```
 predep check                    # premake5 build + unit tests (warnings are errors)
