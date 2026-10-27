@@ -1,5 +1,6 @@
 #include "cli/args.hpp"
 
+#include "core/datadefs.hpp"
 #include "util/style.hpp"
 
 namespace hf {
@@ -28,7 +29,9 @@ void print_usage(FILE* f) {
 
     head("RUN");
     row("run PROFILE [-- CMD...]", "run a sandbox (CMD overrides the profile)");
+    row("run PROFILE NAME [-- ARGS...]", "run the profile's [commands] NAME (ARGS appended)");
     row("run --refresh PROFILE", "bundle profiles: rebuild the Alpine userland first");
+    row("os-shell PROFILE", "bundle profiles: shell in the apk sandbox (debug)");
     row("print PROFILE", "show the exact bwrap argv, change nothing");
     row("check PROFILE", "validate a profile");
 
@@ -53,6 +56,9 @@ void print_usage(FILE* f) {
     row("--debug", "run: open bash (or sh) in the sandbox, not the command");
     row("-n, --dry-run", "same as print");
     row("--refresh", "run: redo changed userland / deps; libs: rewrite list");
+    row("--refresh-dep=NAME", "run: run this dep recipe again (repeatable)");
+    row("--data=DIR", "extra data root, searched first (repeatable)");
+    row("--out=DIR", "libs --refresh: write DIR/os/NAME.profile");
     row("--check", "libs: exit 1 if the saved list is stale");
     row("-v, --verbose", "debug output (list: show file paths)");
 
@@ -90,6 +96,21 @@ Cli parse_args(const std::string& cmd, const Strings& rest) {
             c.run.dns = v;
         }
         else if (a.rfind("--wg=", 0) == 0) c.run.wg_conf = a.substr(5);
+        else if (a.rfind("--refresh-dep=", 0) == 0) {
+            const std::string n = a.substr(14);
+            if (!valid_data_name(n)) throw Error("--refresh-dep expects a dep name (data/dep/NAME.profile)");
+            c.run.refresh_deps.push_back(n);
+        }
+        else if (a.rfind("--data=", 0) == 0) {
+            std::error_code ec;
+            const fs::path d = a.substr(7);
+            if (d.empty() || !fs::is_directory(d, ec)) throw Error("--data expects an existing directory: " + d.string());
+            c.data.push_back(fs::canonical(d, ec).string());
+        }
+        else if (a.rfind("--out=", 0) == 0) {
+            if (a.size() == 6) throw Error("--out expects a directory");
+            c.out = a.substr(6);
+        }
         else if (a.rfind("--cwd=", 0) == 0) c.run.cwd = a.substr(6);
         else if (!a.empty() && a[0] == '-') throw Error("unknown option: " + a + " (see holdfast help)");
         else c.pos.push_back(a);

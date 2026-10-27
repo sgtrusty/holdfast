@@ -44,7 +44,7 @@ The build is described in `premake5.lua`; `predep.toml` declares the `build`/`te
 | New display (a profile for an existing server) | `data/display/NAME.profile`; no C++ change |
 | New display server or protocol (a Wayland compositor mode, ...) | a new `server =` value in `parse_display` → a file in `src/protocol/display/` that fills a `Setup` (binds, env, optional background command) → one line in `display::open()` and a check in `display::validate()` → `docs/DATA.md` `data/display` → test in `display: ...` |
 | New helper binary | add to `doctor()`; check with `which()` and give an actionable error |
-| New tool a minimal-libs profile can use | `data/lib/NAME.profile` (commands, sonames, paths, needs) → `holdfast libs --refresh` on each supported OS → commit the changed `data/os/*.profile`. No C++ change. |
+| New tool a minimal-libs profile can use | `data/lib/NAME.profile` (commands, sonames, paths, needs) → `holdfast libs --refresh --out=./data` on each supported OS → commit the changed `data/os/*.profile`. No C++ change. |
 | New install step for a bundle profile (a tool built/fetched into its `$HOME`) | `data/dep/NAME.profile` (`needs` + `run` lines; install into `$HOME`) → list it under the profile's `[deps] use`. No C++ change. |
 | New OS setup (bundle packages / pinned release, or a host distro file list) | `data/os/NAME.profile`; never inline version/packages in a profile. See `docs/DATA.md`. |
 | New key in a data file | `datadefs.cpp` (strict parse + `render_os` if it is written back) → `docs/DATA.md` → parser test |

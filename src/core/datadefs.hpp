@@ -67,10 +67,13 @@ OsDef parse_os(const std::string& text, const std::string& origin, const std::st
 // data/dep/NAME.profile: one install step for bundle profiles. It runs as an ordinary run of the profile that uses it
 // (same userland read-only, same persistent $HOME, same identity, seccomp and terminal filter). Only what it declares differs:
 //   [dep]     os (required: must equal the using profile's os) · description · needs (commands that must exist in the userland)
+//             provides = ~/path ...: what the recipe leaves behind; a missing one makes the dep run again
 //   [network] mode = none (default) | pasta
-//   [install] run = <shell line>, repeatable, executed in order with HOME = the profile's persistent home.
-// The recipe is trusted code (like any profile's shell lines): read it before you use it.
-DepRecipe parse_dep(const std::string& text, const std::string& origin, const std::string& name);
+//   [install] steps, executed in order with HOME = the profile's persistent home:
+//             run = <shell line> · run_file = <script next to the recipe> · fetch = https://URL SHA256 ~/DEST (needs pasta)
+// The recipe is trusted code (like any profile's shell lines): read it before you use it. holdfast does not expand
+// variables in it; $HOME, $PWD and friends are the shell's. `dir` (the recipe's directory) is needed for run_file.
+DepRecipe parse_dep(const std::string& text, const std::string& origin, const std::string& name, const fs::path& dir = {});
 
 // data/display/NAME.profile: what a display is, so a sandbox profile can just say `[display] use = NAME`.
 //   [display] description · server = xephyr|host       (xephyr = private X11 server; host = your session, Wayland if WAYLAND_DISPLAY is set, else X11)

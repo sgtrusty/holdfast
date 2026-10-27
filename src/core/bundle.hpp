@@ -30,8 +30,22 @@ void bundle_verify(const Profile& p, const Paths& paths);
 //   userland missing          -> download, verify, extract (sandboxed), then `apk add` the os packages (sandboxed)
 //   definition changed        -> error; `refresh` (holdfast run --refresh) rebuilds it, discarding changes made inside
 //   dep never installed       -> run its recipe (sandboxed, writable userland, persistent $HOME, network via pasta)
-//   dep recipe changed        -> error; `refresh` runs every dep recipe again
+//   dep `provides` missing    -> run its recipe again (the stamp says it ran, the files say it is gone)
+//   dep recipe changed        -> error; `refresh` runs every dep recipe again, `refresh_deps` only the named ones
 // dry = true (print/check) never downloads or installs: it only verifies what exists.
-void bundle_ensure(const Profile& p, const User& u, const Paths& paths, bool refresh, bool dry);
+void bundle_ensure(const Profile& p, const User& u, const Paths& paths, bool refresh, bool dry, const Strings& refresh_deps = {});
+
+// The deps whose `provides` paths are missing from the profile's $HOME (paths.home), by name.
+Strings deps_missing_files(const Profile& p, const Paths& paths);
+
+// The text of the `apk add` step: constant except for the shell-quoted package names. Its output is also kept in
+// /var/log/holdfast-apk.log inside the userland, and the tail of it is repeated on failure.
+std::string apk_script(const Strings& packages);
+inline constexpr const char* kApkLog = "var/log/holdfast-apk.log";   // relative to the rootfs
+
+// `holdfast os-shell PROFILE`: an interactive shell in the sandbox that installs the os packages (writable userland,
+// userns-root, the os file's [install] network). For debugging that step; what you change there is not tracked and
+// affects every profile naming the same os until --refresh rebuilds it. dry prints the bwrap argv.
+int bundle_shell(const Profile& p, const User& u, const Paths& paths, bool dry);
 
 }  // namespace hf

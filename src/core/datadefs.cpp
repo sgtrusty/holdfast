@@ -176,7 +176,25 @@ OsDef parse_os(const std::string& text, const std::string& origin, const std::st
     return o;
 }
 
-DepRecipe parse_dep(const std::string& text, const std::string& origin, const std::string& name) {
+namespace {
+
+// A path a dep writes into the profile's $HOME, written `~/rel`. Returns rel; no `..`, nothing outside $HOME.
+std::string home_rel(const IniLine& l, const std::string& origin, const std::string& v) {
+    if (v.rfind("~/", 0) != 0) bad(l, origin, "expected a path in the profile's $HOME, written ~/...: " + v);
+    const fs::path rel = fs::path(v.substr(2)).lexically_normal();
+    if (rel.empty() || rel == "." || rel.is_absolute() || *rel.begin() == "..") bad(l, origin, "must name something below ~/: " + v);
+    for (const auto& c : rel) if (c == "..") bad(l, origin, "no '..' allowed: " + v);
+    std::string r = rel.string();
+    if (!r.empty() && r.back() == '/') r.pop_back();
+    return r;
+}
+
+// One `fetch` step: constant text, the data comes in as the script's positional parameters (see install_dep).
+constexpr const char* kFetchStep = "hf_fetch \"$1\" \"$2\" \"$3\"; shift 3";
+
+}  // namespace
+
+DepRecipe parse_dep(const std::string& text, const std::string& origin, const std::string& name, const fs::path& dir) {
     DepRecipe d;
     d.name = name;
     for (const IniLine& l : parse_ini(text, origin)) {
@@ -192,6 +210,9 @@ DepRecipe parse_dep(const std::string& text, const std::string& origin, const st
                 Strings v; words(v, l.value);
                 for (auto& c : v) if (c.find('/') != std::string::npos || c.empty()) bad(l, origin, "command names have no '/': " + c);
                 d.needs.insert(d.needs.end(), v.begin(), v.end());
+            } else if (l.key == "provides") {
+                Strings v; words(v, l.value);
+                for (auto& c : v) d.provides.push_back(home_rel(l, origin, c));
             } else {
                 bad(l, origin, "unknown key");
             }
@@ -202,16 +223,46 @@ DepRecipe parse_dep(const std::string& text, const std::string& origin, const st
             else if (m == "pasta") d.net = NetMode::Pasta;
             else bad(l, origin, "a dep may use none or pasta (host would share abstract sockets, ivpn needs root)");
         } else if (l.section == "install") {
-            if (l.key != "run") bad(l, origin, "unknown key (expected run)");
-            if (l.value.empty()) bad(l, origin, "empty command");
-            d.run.push_back(l.value);
+            if (l.key == "run") {
+                if (l.value.empty()) bad(l, origin, "empty command");
+                d.run.push_back(l.value);
+            } else if (l.key == "run_file") {
+                // A longer script kept next to the recipe. Relative and below the recipe's directory, so a recipe cannot
+                // pull in an arbitrary host file; its contents are part of the digest like any run line.
+                if (dir.empty()) bad(l, origin, "run_file needs a recipe file (it is resolved relative to it)");
+                const fs::path rel = fs::path(l.value).lexically_normal();
+                if (l.value.empty() || rel.is_absolute()) bad(l, origin, "expected a path relative to this file");
+                for (const auto& c : rel) if (c == "..") bad(l, origin, "no '..' allowed: " + l.value);
+                std::error_code ec;
+                const fs::path real = fs::canonical(dir / rel, ec);         // a symlinked directory must not lead out either
+                if (ec) bad(l, origin, cat("cannot read ", (dir / rel).string(), ": ", ec.message()));
+                if (!path_under(real, fs::canonical(dir, ec))) bad(l, origin, cat((dir / rel).string(), " leads outside ", dir.string()));
+                std::string body;
+                try { body = read_file(real); }
+                catch (const Error& e) { bad(l, origin, cat("cannot read ", real.string(), ": ", e.what())); }
+                if (trim(body).empty()) bad(l, origin, "empty script: " + (dir / rel).string());
+                d.run.push_back(body);
+            } else if (l.key == "fetch") {
+                Strings v; words(v, l.value);
+                if (v.size() != 3) bad(l, origin, "expected: fetch = https://URL SHA256 ~/DEST");
+                if (v[0].rfind("https://", 0) != 0) bad(l, origin, "the URL must be https://");
+                const std::string sha = lower(v[1]);
+                if (!is_hex(sha, 64)) bad(l, origin, "the sha256 must be 64 hex chars");
+                d.fetch.insert(d.fetch.end(), {v[0], sha, home_rel(l, origin, v[2])});
+                d.run.push_back(kFetchStep);
+            } else {
+                bad(l, origin, "unknown key (expected run, run_file or fetch)");
+            }
         } else {
             throw ProfileError(cat(origin, ":", l.no, ": unknown section [", l.section, "]"));
         }
     }
     if (d.os.empty()) throw ProfileError(origin + ": [dep] os = NAME is required: a tool is built for one userland (musl vs glibc), so say which");
-    if (d.run.empty()) throw ProfileError(origin + ": [install] needs at least one `run = ...` line");
-    d.digest = sha256_str(cat(d.os, "|", d.net == NetMode::Pasta ? "pasta" : "none", "|", join(d.needs, " "), "|", join(d.run, "\n")));
+    if (d.run.empty()) throw ProfileError(origin + ": [install] needs at least one `run`, `run_file` or `fetch` line");
+    if (!d.fetch.empty() && d.net != NetMode::Pasta) throw ProfileError(origin + ": [install] fetch downloads: it needs [network] mode = pasta");
+    // `provides` is not part of the digest: it describes the result, so correcting it must not force a reinstall.
+    d.digest = sha256_str(cat(d.os, "|", d.net == NetMode::Pasta ? "pasta" : "none", "|", join(d.needs, " "), "|", join(d.run, "\n"),
+                              "|", join(d.fetch, " ")));
     return d;
 }
 
@@ -278,7 +329,7 @@ LibDef load_lib(const std::string& name, const Strings& roots) {
 DepRecipe load_dep(const std::string& name, const Strings& roots) {
     auto f = find_data(roots, "dep", name);
     if (!f) throw ProfileError(cat("dep '", name, "' not found; create data/dep/", name, ".profile (searched: ", join(roots, ", "), ")"));
-    return parse_dep(read_file(*f), f->string(), name);
+    return parse_dep(read_file(*f), f->string(), name, f->parent_path());
 }
 
 DisplayDef load_display(const std::string& name, const Strings& roots) {
@@ -366,6 +417,7 @@ std::string render_os(const OsDef& o) {
 }
 
 void resolve_profile_data(Profile& p, const Strings& roots) {
+    p.roots = roots;
     // The display first: every profile has one (or none), and the paths below return early.
     if (p.display_use.empty()) p.display.reset();
     else p.display = load_display(p.display_use, roots);

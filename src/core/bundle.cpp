@@ -1,5 +1,8 @@
 #include "core/bundle.hpp"
 
+#include <algorithm>
+#include <cstdio>
+
 #include "core/datadefs.hpp"
 #include "core/plan.hpp"
 #include "core/seccomp.hpp"
@@ -96,7 +99,7 @@ HostLibs require_host_tools(const Profile& p, const User& u) {
                                "the host is mounted unless you list it. Declare the libs that provide them in ", fix, ":\n  [install]\n"
                                "  use = shell archive coreutils", p.install_net == NetMode::Pasta ? " net certs" : "",
                                "\n(data/lib/*.profile; their files on this host come from `holdfast libs --refresh`)"));
-    HostLibs h = resolve_host_libs(p.install_use, data_roots(u.home.string()), "");
+    HostLibs h = resolve_host_libs(p.install_use, p.roots.empty() ? data_roots(u.home.string()) : p.roots, "");
     Strings missing;
     for (const std::string& t : bootstrap_tools(p)) if (!h.commands.count(t)) missing.push_back(t);
     if (!missing.empty())
@@ -228,36 +231,100 @@ ArgBuilder writable_args(const Profile& p, const Paths& paths, const fs::path& s
 // userns-root (your uid mapped to 0, no real privilege), and the network is pasta's private namespace. Deps do not
 // use this; they run as the profile itself (see dep_profile).
 void install_os_packages(const Profile& p, const User& u, const Paths& paths, const fs::path& session) {
-    std::string script = "set -e\napk update\napk add --no-cache";
-    for (auto& pk : p.apk_packages) script += " " + shell_quote(pk);
     log::info(cat("installing the os packages with apk: writable rootfs, userns-root, ", install_net_desc(p), " (data/os/", p.os, ".profile)"));
     ArgBuilder b = writable_args(p, paths, session);
-    b.command({"/bin/sh", "-c", script + "\n"});
+    b.command({"/bin/sh", "-c", apk_script(p.apk_packages)});
     const int rc = run_sandbox(install_launch(p, u, session, b, install_seccomp(p, session)), p.terminal == TermMode::Filter);
-    if (rc != 0) throw Error(cat("installing the os packages failed (exit ", rc, "); see the messages above and check data/os/", p.os, ".profile"));
+    if (rc != 0)
+        throw Error(cat("installing the os packages failed (exit ", rc, "); the end of apk's output is above, all of it is in ",
+                        (paths.rootfs / kApkLog).string(), ". Check data/os/", p.os, ".profile; `holdfast os-shell ", p.name,
+                        "` opens a shell in this exact sandbox to try it by hand"));
 }
 
-void install_dep(const Profile& p, const DepRecipe& d) {
+// Defines hf_fetch for the recipe's `fetch` steps. Constant text: URL, hash and destination arrive as positional
+// parameters (each step is `hf_fetch "$1" "$2" "$3"; shift 3`), never interpolated. Same checks as the rootfs download:
+// https only, the pinned sha256 decides, a mismatch removes the file and fails the recipe.
+const char* kFetchHelper = R"SH(hf_fetch() {
+  hf_d="$HOME/$3"
+  if [ -f "$hf_d" ] && echo "$2  $hf_d" | sha256sum -c - >/dev/null 2>&1; then echo "fetch: ~/$3 is up to date" >&2; return 0; fi
+  mkdir -p "$(dirname "$hf_d")"
+  rm -f "$hf_d.part"
+  echo "fetch: $1 -> ~/$3" >&2
+  curl -fsSL --proto =https --tlsv1.2 --retry 2 -o "$hf_d.part" "$1"
+  if ! echo "$2  $hf_d.part" | sha256sum -c - >/dev/null 2>&1; then rm -f "$hf_d.part"; echo "fetch: sha256 mismatch for $1" >&2; exit 3; fi
+  mv -f "$hf_d.part" "$hf_d"
+}
+)SH";
+
+void install_dep(const Profile& p, const Paths& paths, const DepRecipe& d) {
     // The recipe's own tools are checked first, so a missing `go` is one clear sentence instead of a half-run build.
     std::string script = "set -e\n";
-    for (const auto& n : d.needs)
+    Strings needs = d.needs;
+    if (!d.fetch.empty()) { needs.push_back("curl"); needs.push_back("sha256sum"); }
+    for (const auto& n : needs)
         script += cat("command -v ", shell_quote(n), " >/dev/null 2>&1 || { echo ",
                       shell_quote(cat("dep '", d.name, "' needs '", n, "' in the userland: add its package to data/os/", p.os, ".profile")),
                       " >&2; exit 5; }\n");
+    if (!d.fetch.empty()) script += kFetchHelper;
     for (const auto& l : d.run) script += l + "\n";
 
     RunOptions ro;
     ro.no_cwd = true;
     ro.yes = true;
     ro.userland_ready = true;                                      // the userland and its packages are already in place
-    ro.command = {"/bin/sh", "-c", script};
+    ro.raw_command = true;                                         // recipe lines are the shell's: $PWD, $HOME, ... are not holdfast's
+    ro.command = {"/bin/sh", "-c", script, cat("dep-", d.name)};
+    ro.command.insert(ro.command.end(), d.fetch.begin(), d.fetch.end());
     log::info(cat("dep '", d.name, "': an ordinary run of '", p.name, "' with network=", d.net == NetMode::Pasta ? cat("pasta (DNS ", p.install_dns, ")") : "none",
                   " and this recipe as the command"));
     const int rc = run_profile(dep_profile(p, d), ro);
+    if (rc == 3) throw Error(cat("dep '", d.name, "': a download did not match its sha256 in data/dep/", d.name, ".profile; nothing was kept"));
     if (rc != 0) throw Error(cat("dep '", d.name, "' failed (exit ", rc, "); see the messages above, fix data/dep/", d.name, ".profile and run again"));
+    for (const auto& f : d.provides) {
+        std::error_code ec;
+        if (!fs::exists(fs::symlink_status(paths.home / f, ec)))
+            throw Error(cat("dep '", d.name, "' finished but did not create ~/", f, " (listed in `provides`); fix data/dep/", d.name, ".profile"));
+    }
 }
 
 }  // namespace
+
+Strings deps_missing_files(const Profile& p, const Paths& paths) {
+    Strings out;
+    for (const auto& d : p.deps)
+        for (const auto& f : d.provides) {
+            std::error_code ec;
+            if (!fs::exists(fs::symlink_status(paths.home / f, ec))) { out.push_back(d.name); break; }
+        }
+    return out;
+}
+
+std::string apk_script(const Strings& packages) {
+    // --no-progress: the progress bar redraws one line, which hides the per-package lines (and a terminal filter may drop it).
+    // pipefail so the `tee` copy does not hide apk's exit status; busybox ash has it.
+    std::string add = "apk add --no-cache --no-progress";
+    for (auto& pk : packages) add += " " + shell_quote(pk);
+    return cat("set -eu\nset -o pipefail\nlog=/", kApkLog, "\nmkdir -p \"$(dirname \"$log\")\"\n",
+               "if ! { apk update --no-progress && ", add, "; } 2>&1 | tee \"$log\"; then\n",
+               "  echo '---- apk failed; the last 60 lines of its output follow (all of it: <bundle>/rootfs/", kApkLog, ") ----' >&2\n",
+               "  tail -n 60 \"$log\" >&2\n  exit 1\nfi\n");
+}
+
+int bundle_shell(const Profile& p, const User& u, const Paths& paths, bool dry) {
+    if (p.root != RootMode::Bundle) throw Error(cat("os-shell needs a bundle profile; '", p.name, "' is mode = host"));
+    if (!bundle_installed(paths))
+        throw Error(cat("the userland for '", p.name, "' is not set up yet; run the profile once (holdfast run ", p.name, ")"));
+    bundle_verify(p, paths);
+    require_install_dns(p, "the os shell");
+    struct Scratch { fs::path d; ~Scratch() { std::error_code ec; fs::remove_all(d, ec); } } sc{make_session_dir(u, paths, p.name + "-osshell")};
+    ArgBuilder b = writable_args(p, paths, sc.d);
+    b.setenv("PS1", cat("(holdfast-os:", p.os, ") # "));
+    b.command(debug_shell(p));
+    if (dry) { std::printf("%s\n", b.pretty().c_str()); return 0; }
+    log::warn(cat("os shell for '", p.os, "': writable userland, userns-root, ", install_net_desc(p), ". Changes here are not tracked and apply to "
+                  "every profile with os = ", p.os, " until `holdfast run --refresh` rebuilds it"));
+    return run_sandbox(install_launch(p, u, sc.d, b, install_seccomp(p, sc.d)), p.terminal == TermMode::Filter);
+}
 
 Profile dep_profile(const Profile& p, const DepRecipe& d) {
     Profile r = p;
@@ -274,12 +341,14 @@ Profile dep_profile(const Profile& p, const DepRecipe& d) {
     return r;
 }
 
-void bundle_ensure(const Profile& p, const User& u, const Paths& paths, bool refresh, bool dry) {
+void bundle_ensure(const Profile& p, const User& u, const Paths& paths, bool refresh, bool dry, const Strings& refresh_deps) {
     const bool installed = bundle_installed(paths);
     if (dry) {                                                     // print / check never download or install anything
         if (!installed)
             throw Error(cat("the Alpine userland for '", p.name, "' is not set up yet; run the profile once (holdfast run ", p.name, ") and it is created"));
         bundle_verify(p, paths);
+        for (const auto& n : deps_missing_files(p, paths))
+            log::warn(cat("dep '", n, "': something it provides is missing; the next run installs it again"));
         return;
     }
 
@@ -290,13 +359,23 @@ void bundle_ensure(const Profile& p, const User& u, const Paths& paths, bool ref
         catch (const Error&) { if (!refresh) throw; rebuild = true; }
     }
     const bool packages_due = rebuild || read_stamp(paths.bundle / "packages.stamp") != bundle_spec(p);
+    for (const auto& n : refresh_deps) {
+        const bool known = std::any_of(p.deps.begin(), p.deps.end(), [&](const DepRecipe& d) { return d.name == n; });
+        if (!known) throw Error(cat("--refresh-dep=", n, ": profile '", p.name, "' has no such dep ([deps] use = ", join(p.dep_use, " "), ")"));
+    }
+    const Strings gone = deps_missing_files(p, paths);
     std::vector<const DepRecipe*> due;
     for (const auto& d : p.deps) {
         const std::string have = read_stamp(dep_stamp_path(paths, d));
-        if (refresh || have.empty()) { due.push_back(&d); continue; }
+        const bool named = std::find(refresh_deps.begin(), refresh_deps.end(), d.name) != refresh_deps.end();
+        if (refresh || named || have.empty()) { due.push_back(&d); continue; }
         if (have != dep_stamp(p, d))
-            throw Error(cat("dep '", d.name, "' changed since it was installed into '", p.name, "'; reinstall with: holdfast run --refresh ",
-                            p.name, " (its commands run again)"));
+            throw Error(cat("dep '", d.name, "' changed since it was installed into '", p.name, "'; reinstall it with: holdfast run --refresh-dep=",
+                            d.name, " ", p.name, " (its commands run again)"));
+        if (std::find(gone.begin(), gone.end(), d.name) != gone.end()) {
+            log::info(cat("dep '", d.name, "' was installed, but something it provides is gone from ", paths.home.string(), "; running it again"));
+            due.push_back(&d);
+        }
     }
     if (!rebuild && !packages_due && due.empty()) return;          // the common case: nothing to do
 
@@ -320,7 +399,7 @@ void bundle_ensure(const Profile& p, const User& u, const Paths& paths, bool ref
         write_file(paths.bundle / "packages.stamp", bundle_spec(p) + "\n", 0600);
     }
     for (const DepRecipe* d : due) {
-        install_dep(p, *d);
+        install_dep(p, paths, *d);
         make_private_dir(paths.state / "deps");
         write_file(dep_stamp_path(paths, *d), dep_stamp(p, *d) + "\n", 0600);
     }

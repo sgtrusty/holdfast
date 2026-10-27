@@ -419,6 +419,82 @@ int main() {
         CHECK(valid_data_name("python3") && !valid_data_name("../x") && !valid_data_name("A") && !valid_data_name(""));
     });
 
+    test("profiles: [commands], include and project data", [] {
+        Profile c = parse_profile("[commands]\nbuild = sh /shared/build.sh 'a b'\nTest = make test\n", "t");
+        CHECK((c.commands.at("build") == Strings{"sh", "/shared/build.sh", "a b"}) && c.commands.count("test"));
+        THROWS(ProfileError, parse_profile("[commands]\nbuild =\n", "t"));
+        THROWS(ProfileError, parse_profile("[commands]\n../x = sh\n", "t"));
+        THROWS(ProfileError, parse_profile("[profile]\ninclude = base.profile\n", "t"));    // text from no file: nothing to resolve against
+        char tmpl[] = "/tmp/hf-inc-XXXXXX";
+        const std::string d = mkdtemp(tmpl);
+        fs::create_directories(d + "/tools/data/dep");
+        write_file(d + "/tools/common.profile", "[profile]\nmode = bundle\nos = alpine-x\ndata = ./data\n[deps]\nuse = a\n"
+                                                "[commands]\nbuild = sh build.sh\n[network]\nmode = pasta\n", 0644);
+        write_file(d + "/tools/run.profile", "[profile]\ninclude = common.profile\ncommand = sh\n[deps]\nuse = b\n"
+                                             "[commands]\nbuild = sh other.sh\n[network]\ndns = 1.1.1.1\n", 0644);
+        Profile r = load_profile_file(d + "/tools/run.profile");                          // dns in the including file completes the base
+        CHECK(r.name == "run" && r.root == RootMode::Bundle && r.os == "alpine-x" && r.net == NetMode::Pasta && r.dns == "1.1.1.1");
+        CHECK((r.dep_use == Strings{"a", "b"}) && (r.commands.at("build") == Strings{"sh", "other.sh"}));   // lists extend, keys override
+        CHECK((r.data_dirs == Strings{fs::canonical(d + "/tools/data").string()}));     // relative to the file that says it
+        THROWS(ProfileError, load_profile_file(d + "/tools/common.profile"));            // pasta without dns: the base alone is incomplete
+        write_file(d + "/tools/named.profile", "[profile]\nname = base\n", 0644);
+        write_file(d + "/tools/bad.profile", "[profile]\ninclude = named.profile\ncommand = sh\n", 0644);
+        THROWS(ProfileError, load_profile_file(d + "/tools/bad.profile"));               // an included file may not name the profile
+        write_file(d + "/tools/loop.profile", "[profile]\ninclude = loop.profile\n", 0644);
+        THROWS(ProfileError, load_profile_file(d + "/tools/loop.profile"));
+        write_file(d + "/tools/nodata.profile", "[profile]\ndata = ./missing\n", 0644);
+        THROWS(ProfileError, load_profile_file(d + "/tools/nodata.profile"));             // a data dir that is not there fails closed
+        write_file(d + "/tools/noinc.profile", "[profile]\ninclude = missing.profile\n", 0644);
+        THROWS(ProfileError, load_profile_file(d + "/tools/noinc.profile"));
+        fs::remove_all(d);
+    });
+
+    test("data files: dep recipes (provides, run_file, fetch, no variable expansion)", [] {
+        const std::string base = "[dep]\nos = alp\n";
+        const std::string sha = std::string(64, 'b');
+        DepRecipe p = parse_dep(base + "provides = ~/.local/bin/tool ~/vendor/\n[install]\nrun = echo $PWD\n", "t", "x");
+        CHECK((p.provides == Strings{".local/bin/tool", "vendor"}) && (p.run == Strings{"echo $PWD"}));
+        CHECK(p.digest == parse_dep(base + "[install]\nrun = echo $PWD\n", "t", "x").digest);     // provides describes the result only
+        for (const char* bad : {"/abs", "~/", "~/../x", "~/a/../../x", "rel"})
+            THROWS(ProfileError, parse_dep(base + "provides = " + bad + "\n[install]\nrun = a\n", "t", "x"));
+        const std::string net = "[network]\nmode = pasta\n";
+        DepRecipe f = parse_dep(base + net + "[install]\nfetch = https://example.org/a.tgz " + sha + " ~/dl/a.tgz\nrun = tar xzf ~/dl/a.tgz\n", "t", "x");
+        CHECK((f.fetch == Strings{"https://example.org/a.tgz", sha, "dl/a.tgz"}) && f.run.size() == 2);
+        CHECK(f.run[0].find("example.org") == std::string::npos);                         // the URL is a parameter, never shell text
+        CHECK(f.digest != parse_dep(base + net + "[install]\nfetch = https://example.org/b.tgz " + sha + " ~/dl/a.tgz\nrun = tar xzf ~/dl/a.tgz\n", "t", "x").digest);
+        THROWS(ProfileError, parse_dep(base + "[install]\nfetch = https://e.org/a " + sha + " ~/a\n", "t", "x"));    // downloads need pasta
+        THROWS(ProfileError, parse_dep(base + net + "[install]\nfetch = http://e.org/a " + sha + " ~/a\n", "t", "x"));
+        THROWS(ProfileError, parse_dep(base + net + "[install]\nfetch = https://e.org/a abc ~/a\n", "t", "x"));
+        THROWS(ProfileError, parse_dep(base + net + "[install]\nfetch = https://e.org/a " + sha + "\n", "t", "x"));
+        THROWS(ProfileError, parse_dep(base + net + "[install]\nfetch = https://e.org/a " + sha + " /etc/a\n", "t", "x"));
+        THROWS(ProfileError, parse_dep(base + "[install]\nrun_file = build.sh\n", "t", "x"));                       // no recipe file to resolve against
+        char tmpl[] = "/tmp/hf-dep-XXXXXX";
+        const std::string d = mkdtemp(tmpl);
+        fs::create_directories(d + "/dep/scripts");
+        write_file(d + "/dep/scripts/build.sh", "cd \"$HOME\"\nmake\n", 0644);
+        write_file(d + "/secret", "x", 0644);
+        DepRecipe rf = parse_dep(base + "[install]\nrun = a\nrun_file = scripts/build.sh\n", "t", "x", d + "/dep");
+        CHECK(rf.run.size() == 2 && rf.run[1] == "cd \"$HOME\"\nmake\n");
+        write_file(d + "/dep/scripts/build.sh", "make install\n", 0644);
+        CHECK(rf.digest != parse_dep(base + "[install]\nrun = a\nrun_file = scripts/build.sh\n", "t", "x", d + "/dep").digest);   // the script is in the digest
+        THROWS(ProfileError, parse_dep(base + "[install]\nrun_file = ../secret\n", "t", "x", d + "/dep"));
+        THROWS(ProfileError, parse_dep(base + "[install]\nrun_file = " + d + "/secret\n", "t", "x", d + "/dep"));
+        THROWS(ProfileError, parse_dep(base + "[install]\nrun_file = scripts/missing.sh\n", "t", "x", d + "/dep"));
+        fs::create_directory_symlink(d, d + "/dep/up");
+        THROWS(ProfileError, parse_dep(base + "[install]\nrun_file = up/secret\n", "t", "x", d + "/dep"));                   // not via a symlink either
+        // a stamp says it ran; `provides` says whether it is still there
+        Profile q; q.name = "q"; q.deps = {p};
+        Paths pa; pa.home = d + "/home";
+        CHECK((deps_missing_files(q, pa) == Strings{"x"}));
+        fs::create_directories(pa.home / ".local/bin"); fs::create_directories(pa.home / "vendor");
+        write_file(pa.home / ".local/bin/tool", "", 0755);
+        CHECK(deps_missing_files(q, pa).empty());
+        fs::remove_all(d);
+        const std::string apk = apk_script({"git", "a b"});
+        CHECK(apk.find("--no-progress") != std::string::npos && apk.find("set -o pipefail") != std::string::npos);
+        CHECK(apk.find(" git 'a b'") != std::string::npos && apk.find(kApkLog) != std::string::npos && apk.find("tail -n") != std::string::npos);
+    });
+
     test("data files: profiles are found in the data roots only", [] {
         DataRoot r;
         char tmpl[] = "/tmp/hf-home-XXXXXX";
@@ -498,6 +574,9 @@ int main() {
         THROWS(ProfileError, resolve_profile_data(nodep, {r.d}));                          // unknown dep: fail closed
         THROWS(Error, make_paths(u, "x", "../escape"));
         THROWS(Error, bundle_ensure(p, u, pa, false, true));                               // print/check never download: nothing set up yet
+        try { bundle_ensure(q, u, pb, false, false, {"nosuch"}); CHECK(false); }         // --refresh-dep names a dep of this profile
+        catch (const Error& e) { CHECK(std::string(e.what()).find("no such dep") != std::string::npos); }
+        CHECK(!fs::exists(pb.state));
         THROWS(ProfileError, bundle_ensure(p, u, pa, false, false));                       // alpine-x has no [install] dns: refused, no resolv.conf fallback
         CHECK(!fs::exists(pa.state));
         Profile nouse = p;
@@ -570,6 +649,13 @@ int main() {
         THROWS(Error, parse_args("run", {"--bogus", "p"}));
         THROWS(Error, parse_args("run", {"--net=bogus", "p"}));
         CHECK(!handle_meta({"run"}).has_value());                                    // real commands are not meta commands
+        Cli r = parse_args("run", {"--refresh-dep=lazygit", "--refresh-dep=delta", "p", "build", "--", "-j4"});
+        CHECK((r.run.refresh_deps == Strings{"lazygit", "delta"}) && !r.refresh && (r.pos == Strings{"p", "build"}) && (r.run.command == Strings{"-j4"}));
+        THROWS(Error, parse_args("run", {"--refresh-dep=../x", "p"}));
+        CHECK((parse_args("list", {"--data=/", "deps"}).data == Strings{"/"}));
+        THROWS(Error, parse_args("list", {"--data=/nonexistent-hf-dir"}));
+        CHECK(parse_args("libs", {"--refresh", "--out=./data"}).out == "./data");
+        THROWS(Error, parse_args("libs", {"--out="}));
     });
 
     test("ivpn: handshake diagnosis", [] {
@@ -793,6 +879,11 @@ int main() {
         c.display->background = "i3";                                                     // what the X11 backend sets for `wm`
         Plan px = build_plan(p, c);
         CHECK(px.b.cmd().size() == 5 && px.b.cmd()[0] == "/bin/sh" && px.b.cmd()[2] == "i3 & exec \"$@\"" && px.b.cmd()[4] == "sh");
+        c.display.reset();
+        c.command_override = {"/bin/sh", "-c", "cd \"$PWD\" && echo $HOME"};
+        THROWS(ProfileError, build_plan(p, c));                                           // $PWD is not a holdfast variable
+        c.expand_command = false;                                                         // a dep recipe: the shell's variables, left alone
+        CHECK(build_plan(p, c).b.cmd()[2] == "cd \"$PWD\" && echo $HOME");
         fs::remove_all(d);
     });
 

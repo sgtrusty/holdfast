@@ -16,6 +16,7 @@ struct PlanCtx {
     bool mount_cwd = false;
     std::optional<hf::display::Setup> display;   // what the display backend gives the sandbox (X11, Wayland, ...); none = no display
     Strings command_override;
+    bool expand_command = true;       // false for dep recipes: their $VARS belong to the shell, not to holdfast
     bool userns_disable_supported = false;
     bool network = false;             // sandbox shares a (possibly netns-restricted) network
     bool pty_proxy = false;           // the terminal is proxied through a pty: bwrap must NOT also setsid (--new-session)

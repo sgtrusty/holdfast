@@ -16,22 +16,44 @@
 
 using namespace hf;
 
-static Profile load(const std::string& name) {
+// Data roots, first match wins: --data dirs, the profile's own [profile] data dirs, then the usual search order.
+static Profile load(const std::string& name, const Strings& extra) {
     std::string home;
     try { home = resolve_user().home.string(); } catch (...) { if (const char* h = std::getenv("HOME")) home = h; }
-    Profile p = load_profile_file(find_profile(name, home));
-    resolve_profile_data(p, data_roots(home));       // os file / library file lists the profile refers to (fails closed)
+    Profile p = load_profile_file(find_profile(name, home, extra));
+    Strings roots = extra;
+    for (const auto& d : p.data_dirs) if (std::find(roots.begin(), roots.end(), d) == roots.end()) roots.push_back(d);
+    for (const auto& d : data_roots(home)) if (std::find(roots.begin(), roots.end(), d) == roots.end()) roots.push_back(d);
+    if (!p.data_dirs.empty()) log::debug(cat("profile '", p.name, "' adds data roots: ", join(p.data_dirs, ", ")));
+    resolve_profile_data(p, roots);                  // os file / library file lists the profile refers to (fails closed)
     return p;
+}
+
+// `run PROFILE NAME [-- ARGS]`: the profile's [commands] NAME with ARGS appended. Without NAME, `-- CMD` replaces the command.
+static void apply_named_command(const Profile& p, const std::string& name, RunOptions& o) {
+    auto it = p.commands.find(name);
+    if (it == p.commands.end()) {
+        Strings have;
+        for (const auto& [k, v] : p.commands) have.push_back(k);
+        throw Error(cat("profile '", p.name, "' has no command '", name, "'",
+                        have.empty() ? std::string(" (it has no [commands] section)") : cat("; it has: ", join(have, " "))));
+    }
+    if (o.debug) throw Error("--debug replaces the command with a shell; drop the command name");
+    Strings cmd = it->second;
+    cmd.insert(cmd.end(), o.command.begin(), o.command.end());
+    o.command = cmd;
 }
 
 // `list` shows what `run NAME` / profiles' `use` and `os` would find, in the same search order (first match wins, so a
 // user copy hides a shipped one). -v adds the file each entry came from.
-static int cmd_list(const Strings& a, bool verbose) {
+static int cmd_list(const Strings& a, bool verbose, const Strings& extra) {
     namespace fs = std::filesystem;
     std::string home;
     try { home = resolve_user().home.string(); } catch (...) {}
-    const Strings roots = data_roots(home);
-    if (a.size() > 1 || (!a.empty() && a[0] != "libs" && a[0] != "os" && a[0] != "deps" && a[0] != "displays")) throw Error("usage: holdfast list [libs|os|deps|displays] [-v]");
+    Strings roots = extra;
+    for (const auto& r : data_roots(home)) roots.push_back(r);
+    if (a.size() > 1 || (!a.empty() && a[0] != "libs" && a[0] != "os" && a[0] != "deps" && a[0] != "displays"))
+        throw Error("usage: holdfast list [libs|os|deps|displays] [--data=DIR] [-v]");
     // Piped output stays plain, headerless and one entry per line; on a terminal there is a header and colour.
     const Style st = style_for(stdout);
     bool header_done = false;
@@ -101,26 +123,36 @@ int main(int argc, char** argv) {
 
         if (o.debug && cmd != "run" && cmd != "print") throw Error("--debug applies to `run` (open a shell in the sandbox) and `print` (show how)");
 
-        if (cmd == "list") return cmd_list(pos, cli.verbose);
+        if (!o.refresh_deps.empty() && cmd != "run") throw Error("--refresh-dep applies to `run`");
+        if (!cli.out.empty() && cmd != "libs") throw Error("--out applies to `libs --refresh`");
+        if (cmd == "list") return cmd_list(pos, cli.verbose, cli.data);
 
         if (cmd == "libs") {
-            if (pos.size() > 1 || (cli.check && cli.refresh)) throw Error("usage: holdfast libs [--check|--refresh] [OS]");
-            return cmd_libs(pos.empty() ? "" : pos[0], cli.check, cli.refresh);
+            if (pos.size() > 1 || (cli.check && cli.refresh)) throw Error("usage: holdfast libs [--check|--refresh [--out=DIR]] [OS]");
+            return cmd_libs(pos.empty() ? "" : pos[0], cli.check, cli.refresh, cli.data, cli.out);
         }
         if (cmd == "net-cleanup") {
             if (pos.size() != 1) throw Error("usage: holdfast net-cleanup NAME");
             net_cleanup(pos[0]);
             return 0;
         }
-        if (pos.size() != 1) throw Error("expected exactly one PROFILE (see --help)");
-        Profile p = load(pos[0]);
+        const bool named = cmd == "run" || cmd == "print" || cmd == "check";
+        if (pos.empty() || pos.size() > (named ? 2u : 1u))
+            throw Error(named ? "expected PROFILE [NAME] (see --help)" : "expected exactly one PROFILE (see --help)");
+        Profile p = load(pos[0], cli.data);
+        if (pos.size() == 2) apply_named_command(p, pos[1], o);
+
+        if (cmd == "os-shell") {
+            const User u = resolve_user();
+            return bundle_shell(p, u, make_paths(u, p.name, p.bundle_id), o.dry);
+        }
 
         if (cmd == "run") return run_profile(p, o);
         if (cmd == "print") { o.dry = true; return run_profile(p, o); }
         if (cmd == "check") {
             validate_profile(p, true);
             o.dry = true; o.yes = true; o.command = o.command.empty() ? Strings{} : o.command;
-            if (p.command.empty()) o.command = {"true"};
+            if (p.command.empty() && o.command.empty()) o.command = {"true"};
             if (p.root == RootMode::Bundle && !fs::exists(make_paths(resolve_user(), p.name, p.bundle_id).rootfs))
                 std::fprintf(stderr, "note: the Alpine userland is not set up yet; it is created the first time you run this profile\n");
             else

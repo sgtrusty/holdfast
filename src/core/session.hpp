@@ -10,6 +10,7 @@ struct RunOptions {
     bool yes = false;                   // answer "yes" to the cwd prompt
     bool no_cwd = false;
     bool refresh = false;               // bundle profiles: redo a changed userland / the dep recipes first
+    Strings refresh_deps;               // --refresh-dep=NAME: run just these dep recipes again
     bool userland_ready = false;        // the caller (bundle_ensure running a dep) already prepared the userland: do not recurse
     bool debug = false;                 // --debug: an interactive shell in this exact sandbox instead of the profile's command
     std::optional<fs::path> cwd;
@@ -17,6 +18,7 @@ struct RunOptions {
     std::optional<std::string> dns;     // --dns=IPv4|host: overrides [network] dns (validated by check_dns)
     std::optional<std::string> wg_conf;
     Strings command;                    // overrides [profile] command
+    bool raw_command = false;           // the command is a dep recipe (trusted shell): holdfast does not expand $VARS in it
 };
 
 // Profile sanity checks that don't need root or a display. Throws ProfileError.

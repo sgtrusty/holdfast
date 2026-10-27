@@ -13,13 +13,15 @@ namespace hf {
 
 // Everything the command line says after the command word.
 struct Cli {
-    std::string cmd;          // run, print, check, bundle, libs, purge, net-test, net-cleanup, ...
-    Strings pos;              // positional words: PROFILE, the bundle subcommand, NAME, OS, ...
+    std::string cmd;          // run, print, check, os-shell, libs, list, net-test, net-cleanup, ...
+    Strings pos;              // positional words: PROFILE, a [commands] NAME, OS, ...
     RunOptions run;           // what run/print/check/net-test read; run.command = the words after `--`
     bool verbose = false;     // -v
     bool yes = false;         // -y: also used by purge confirmations
     bool refresh = false;     // --refresh: rebuild a bundle / rewrite an OS file list
     bool check = false;       // --check: libs, compare instead of write
+    Strings data;             // --data=DIR (repeatable): extra data roots, searched before every other
+    std::string out;          // --out=DIR: libs --refresh, the data root to write into
                               // --debug is in run.debug (run/print only; main rejects it elsewhere)
 };
 

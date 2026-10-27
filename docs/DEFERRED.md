@@ -69,7 +69,7 @@ checks (resize, Ctrl-C, mouse, exit) with `lazyvim` and `lazygit-dev`. Specific 
 ## Libraries and bundles
 
 - **No per-OS file lists are shipped.** `data/os` has the Alpine bundle definition but no host file lists: the first
-  minimal-libs run on a distro tells you to create one (`HOLDFAST_DATA=./data holdfast libs --refresh`). A list must be
+  minimal-libs run on a distro tells you to create one (`holdfast libs --refresh --out=./data`). A list must be
   created on each supported distro/architecture and committed; CI should run `holdfast libs --check` per supported OS.
   Until then the shipped example profiles use `libs = full`.
 - **The file list can still go stale, just in one place instead of in every profile.** After an upgrade
@@ -84,7 +84,7 @@ checks (resize, Ctrl-C, mouse, exit) with `lazyvim` and `lazygit-dev`. Specific 
 - Dep recipes install into `$HOME`: the userland is read-only for them, so a write elsewhere fails (packages go in the
   `data/os` file). A recipe that needs a tool whose cache or output is not under `$HOME` or `/tmp` will fail until it is
   pointed there; this has not been tried with `go`, `cargo` or `git` under a real bwrap yet.
-- A dep's stamp covers its recipe, not the userland it was built against: after `--refresh` rebuilds the userland (a new Go,
+- A dep's stamp covers its recipe (and, with `provides`, that its files still exist), not the userland it was built against: after `--refresh` rebuilds the userland (a new Go,
   say), already-installed deps are kept until their own recipe changes or you delete their stamp. `needs` only checks that
   a command exists, not its version.
 - The `apk add` sandbox (writable userland, userns-root, network) runs without the default seccomp filter. Dep recipes do
@@ -95,6 +95,30 @@ checks (resize, Ctrl-C, mouse, exit) with `lazyvim` and `lazygit-dev`. Specific 
   prints the data dir). Bundles are shared by `os`, so deleting `bundles/<os>/` affects every profile naming it.
 - A changed `data/os` definition makes runs fail until `--refresh`; there is no incremental update (it re-extracts and
   reinstalls everything).
+- **One uid in the install sandbox.** bwrap maps a single uid/gid (yours, as 0), so a package that ships files owned by
+  another uid or gid (setuid helpers such as `linux-pam`'s `unix_chkpwd`) cannot be installed: `failed to preserve owner`.
+  Possible fixes, none done: apk's `--usermode` where the Alpine release has it, or subordinate uid/gid ranges
+  (`/etc/subuid`, `newuidmap`) the way rootless podman does. The second would also be needed by dpkg and pacman.
+- **Alpine only, so musl only.** Prebuilt Linux release binaries are almost always glibc, and a musl build cannot load the
+  host's glibc GPU drivers, so a bundle cannot produce something that runs accelerated on a glibc desktop. The plan is a
+  `distro =` key in `kind = bundle` files that selects a backend (`fetch_base`, `install_packages`, `verify`; the apk step is
+  already isolated in `install_os_packages()`), with `alpine_*` kept as aliases:
+
+  | | Alpine (today) | Debian | Arch |
+  |---|---|---|---|
+  | base rootfs | minirootfs tarball + sha256 | official `rootfs.tar.xz` + sha256 | `archlinux-bootstrap-YYYY.MM.01` + sha256/signature |
+  | packages | `apk add` | `apt-get install` | `pacman -S` |
+  | pinning | exact release; packages float inside it | `snapshot.debian.org` date | Arch Linux Archive date |
+  | userns-root gotchas | setuid owners | dpkg `chown`/statoverride, `APT::Sandbox::User "root"`, no systemd triggers | `DisableSandbox`, keyring init or `SigLevel`, mirrors |
+
+  Every backend shares the one-uid problem above. A GPU option for bundle profiles (`/dev/dri`) only makes sense once the
+  bundle's libc can match the host drivers, so it waits for this.
+- **Deps cannot write to the working tree.** A recipe sees only `$HOME`, so files a project build wants under its own tree
+  must be copied there by the build step. An opt-in, per-recipe read-write bind of one subdirectory was considered and left
+  out for now: it lets an install step (often fetching code from the internet) write into your repository, so it needs the
+  same `cwd` consent and `.git` protection as a normal run and a test that the subdirectory cannot escape the tree.
+- No `print --install`: `holdfast os-shell -n PROFILE` prints the argv of the install sandbox, but not the apk script
+  (it is `apk_script()` in `src/core/bundle.cpp`).
 - Bundles installed by the earlier `bundle setup` layout (`profiles/<name>/rootfs`) are not migrated: the next run sets
   up a new one. A bundle profile needs `os = NAME` (the inline `[bundle]` version/packages keys are rejected), and
   `alpine_version` must be an exact release.

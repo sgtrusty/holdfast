@@ -1,5 +1,6 @@
 // holdfast - declarative sandbox profile (INI-style, strict: unknown keys fail)
 #pragma once
+#include <map>
 #include <utility>
 
 #include "util/common.hpp"
@@ -28,8 +29,10 @@ struct DepRecipe {
     std::string os;                // the userland it is built for; the using profile must name the same os
     NetMode net = NetMode::None;   // [network] mode: none (default) or pasta
     Strings needs;                 // commands that must already exist in the userland (its packages come from data/os)
-    Strings run;                   // shell lines, run once with the profile's identity and $HOME
-    std::string digest;            // hash of os+net+needs+run: a changed recipe is detected, never silently re-run
+    Strings run;                   // shell lines (and run_file contents), in order; holdfast does not expand variables in them
+    Strings fetch;                 // URL SHA256 DEST triples, flattened; each `fetch` step in `run` consumes one triple
+    Strings provides;              // paths relative to $HOME that must exist once installed (missing => the dep is due again)
+    std::string digest;            // hash of os+net+needs+run+fetch: a changed recipe is detected, never silently re-run
 };
 
 // data/display/NAME.profile: what a display IS. A sandbox profile only says `[display] use = NAME`; X11 specifics (Xephyr, its
@@ -57,6 +60,7 @@ struct Profile {
     std::string seccomp = "default";   // "default" (built-in filter) | "none" | path to a compiled BPF file
     CwdMode cwd = CwdMode::Ask;
     std::string cwd_dest = "/shared";
+    Strings data_dirs;             // [profile] data: extra data roots, searched before the usual ones (absolute after load_profile_file)
 
     // [bin] (host mode)
     Strings bins;                  // "name" or "name=/abs/path"
@@ -102,6 +106,9 @@ struct Profile {
     // [deps] use: the data/dep recipes installed into this profile's persistent $HOME (bundle mode only).
     Strings dep_use;
 
+    // [commands] NAME = words: `holdfast run PROFILE NAME [-- ARGS]` runs these words (plus ARGS) instead of [profile] command.
+    std::map<std::string, Strings> commands;
+
     // Everything below is NOT parsed from the profile: resolve_profile_data() fills it from the profile's data/os file
     // (bundle kind) and its data/dep recipes, so one OS setup and each install step are declared exactly once.
     std::string bundle_id;         // = the os name; every profile naming the same os shares one userland
@@ -113,15 +120,20 @@ struct Profile {
     std::string install_dns;       // its dns: required when an install step (fetch, apk, a pasta dep) uses the network
     Strings install_use;           // its use: the data/lib names the bootstrap may mount from the host
     std::vector<DepRecipe> deps;   // in `use` order
+    Strings roots;                 // NOT parsed: the data roots resolve_profile_data() used (the bootstrap resolves [install] use with them)
 };
 
 Profile parse_profile(const std::string& text, const std::string& origin);
 // pasta needs an IPv4 dns; host needs an IPv4 dns or `host`; none/ivpn take none. Re-checked after --net/--dns overrides.
 void check_dns(const Profile& p, const std::string& origin);
+// Reads a profile file. `[profile] include = FILE` (repeatable, relative to the including file) is applied first, so the
+// including file's keys override or extend it; an included file may not set `name`. `[profile] data = DIR` is resolved
+// against the file that states it and must exist. Fails closed on cycles, depth > 8, missing files.
 Profile load_profile_file(const fs::path& p);
 // Resolve "name" or a path to a profile file.
 // A path (contains '/' or ends in .profile) is used as is; a name is <data root>/profile/NAME.profile, first root wins.
-fs::path find_profile(const std::string& name_or_path, const std::string& home);
+// `extra` roots (--data, searched first) come before data_roots(home).
+fs::path find_profile(const std::string& name_or_path, const std::string& home, const Strings& extra = {});
 // Folders older versions searched ($HOLDFAST_PROFILES, ~/.config/holdfast/profiles, /etc/holdfast/profiles): only checked
 // so a profile left there is an error that says where to move it, never silently ignored.
 Strings legacy_profile_dirs(const std::string& home);

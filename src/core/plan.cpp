@@ -366,7 +366,7 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
     b.chdir(wd);
     Strings cmd = c.command_override.empty() ? p.command : c.command_override;
     if (cmd.empty()) throw ProfileError("no command: set [profile] command or pass one after --");
-    for (auto& w : cmd) w = expand(w, vc);
+    if (c.expand_command) for (auto& w : cmd) w = expand(w, vc);
     if (c.display && !c.display->background.empty()) {   // X11: the window manager; nothing for Wayland
         Strings wrapped = {"/bin/sh", "-c", c.display->background + " & exec \"$@\"", "holdfast"};
         wrapped.insert(wrapped.end(), cmd.begin(), cmd.end());

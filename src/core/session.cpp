@@ -126,7 +126,7 @@ int run_profile(Profile p, RunOptions o) {
     Prepared pr = prepare(p);
 
     if (p.root == RootMode::Bundle && !o.userland_ready)
-        bundle_ensure(p, pr.user, pr.paths, o.refresh, o.dry);   // first run builds it, in sandboxes
+        bundle_ensure(p, pr.user, pr.paths, o.refresh, o.dry, o.refresh_deps);   // first run builds it, in sandboxes
 
     // -- working tree ------------------------------------------------------------
     CwdMode cm = o.no_cwd ? CwdMode::None : (o.yes || o.cwd ? CwdMode::Yes : p.cwd);
@@ -146,6 +146,7 @@ int run_profile(Profile p, RunOptions o) {
     PlanCtx c;
     c.user = pr.user; c.paths = pr.paths; c.policy = pr.policy.get(); c.session = sd.path;
     c.cwd = cwd; c.mount_cwd = mount_cwd; c.command_override = o.command;
+    c.expand_command = !o.raw_command;
     c.userns_disable_supported = pr.ver.at_least(0, 8, 0);
     c.network = p.net != NetMode::None;
     c.pasta = p.net == NetMode::Pasta;

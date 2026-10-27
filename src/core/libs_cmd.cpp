@@ -14,20 +14,22 @@ namespace hf {
 
 namespace {
 
-// Where `--refresh` writes, always: $HOLDFAST_DATA if set (the repo's data/ while developing), else the user's own data dir.
-// Never the file it was read from: that may be the shipped data (/opt/holdfast, a checkout), which is not the user's to
-// rewrite. The user copy comes first in data_roots(), so it shadows a shipped file of the same name.
-fs::path user_os_path(const std::string& home, const std::string& name) {
-    fs::path root = (std::getenv("HOLDFAST_DATA") && *std::getenv("HOLDFAST_DATA")) ? fs::path(std::getenv("HOLDFAST_DATA"))
-                                                                                     : fs::path(home) / ".config/holdfast/data";
+// Where `--refresh` writes: --out=DIR if given, else the user's own data dir. Never the file it was read from (that may be
+// the shipped data in /opt/holdfast or a checkout, or a project's data dir), and never $HOLDFAST_DATA implicitly: the list
+// describes THIS machine, so it only lands in a shared or committed directory when you say so. The user copy comes first
+// in data_roots() after $HOLDFAST_DATA, so it shadows a shipped file of the same name.
+fs::path user_os_path(const std::string& home, const std::string& name, const std::string& out) {
+    const fs::path root = out.empty() ? fs::path(home) / ".config/holdfast/data" : fs::path(out);
     return root / "os" / (name + ".profile");                       // find_data() only looks for .profile
 }
 
 }  // namespace
 
-int cmd_libs(const std::string& name_arg, bool check, bool refresh) {
+int cmd_libs(const std::string& name_arg, bool check, bool refresh, const Strings& extra, const std::string& out_dir) {
     const User u = resolve_user();
-    const Strings roots = data_roots(u.home.string());
+    Strings roots = extra;
+    for (const auto& r : data_roots(u.home.string())) roots.push_back(r);
+    if (!out_dir.empty() && !refresh) throw Error("--out applies to `libs --refresh` (where to write the file list)");
     const HostId host = read_host_id();
     const std::string name = name_arg.empty() ? suggest_os_name(host) : name_arg;
     if (!valid_data_name(name)) throw Error("invalid os name: " + name);
@@ -110,7 +112,8 @@ int cmd_libs(const std::string& name_arg, bool check, bool refresh) {
     const std::string text = render_os(out);
 
     if (!refresh) { std::fputs(text.c_str(), stdout); report_failed(); return failed.empty() ? 0 : 1; }
-    const fs::path target = user_os_path(u.home.string(), name);
+    if (!out_dir.empty() && !fs::is_directory(out_dir)) throw Error(cat("--out=", out_dir, ": not a directory (it is a data root: the file goes to ", out_dir, "/os/)"));
+    const fs::path target = user_os_path(u.home.string(), name, out_dir);
     if (old && fs::path(old->file) != target)
         log::info(cat("based on ", old->file.string(), " (left untouched; its other architectures are kept in the new file)"));
     std::error_code ec;

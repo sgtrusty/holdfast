@@ -9,10 +9,12 @@ Mount syntax: `SRC` or `SRC => DEST` (DEST defaults to SRC). Globs (`* ? [..]`) 
 | key | default | meaning |
 |---|---|---|
 | name | file stem | `[a-z0-9][a-z0-9_-]{0,31}`; names state dirs and the netns |
+| include | | another profile file, relative to this one (repeatable). It is read first and this file applies on top: single keys override, lists (`[deps] use`, `[fs] ro`, …) extend, a `[commands]` name replaces. An included file may not set `name`; cycles and nesting deeper than 8 files are errors. |
+| data | | a data directory (with `os/ dep/ lib/ display/` inside), relative to this file (repeatable). Searched **before** the usual roots, so a project can ship its own os and dep files next to its profile; it must exist. `--data=DIR` on the command line does the same and comes first. |
 | description | | shown by `list` |
 | mode | `host` | `host` (whitelist host binaries/libs) or `bundle` (private Alpine) |
 | os | | `data/os/NAME.profile`. **Bundle profiles: required**, names the shared Alpine userland (version, pinned hash, packages). Host profiles: optional pin of the OS lock to use; default is the entry matching the host's `/etc/os-release`. |
-| command | | argv, shell-style quoting; replaced by `-- CMD…` on the CLI |
+| command | | argv, shell-style quoting; replaced by `-- CMD…` on the CLI (see also `[commands]`) |
 | hostname | `holdfast` | UTS hostname inside |
 | terminal | `filter` | `filter`: when stdin/stdout are terminals the program runs on a fresh pty (its own controlling tty) and everything it prints is filtered, see "Terminal filter" below. `passthrough`: the sandbox writes straight to your terminal (not recommended). |
 | new_session | `yes` | `bwrap --new-session`. Only used when the terminal is NOT proxied (`terminal = passthrough`, or stdio is not a tty). It blocks TIOCSTI, but Ctrl-C then hits holdfast and `/dev/tty` is unavailable. With `terminal = filter` it is unnecessary. |
@@ -64,7 +66,10 @@ network namespace and therefore those sockets: prefer `pasta`. The LAN is reacha
 - `host`: an IPv4 address (written to the sandbox's `/etc/resolv.conf`), or `dns = host` to mount the host's file.
 - `ivpn` takes DNS from the WireGuard config and `none` has no network: `dns` there is an error.
 
-Deps and the userland install steps do not use this key; they use the os file's `[install] dns`.
+Deps and the userland install steps do not use this key; they use the os file's `[install] dns`. The two are separate
+on purpose: `[network] dns` is what the *program* resolves with on every run, `[install] dns` (in `data/os/NAME.profile`) is
+what downloading the userland, `apk add` and every dep with `[network] mode = pasta` use. A bundle profile with
+`mode = pasta` therefore names a resolver in both places.
 
 ### Default seccomp filter
 `seccomp = default` returns EPERM for: kexec/module/reboot, `bpf`, `perf_event_open`, `userfaultfd`, `io_uring_*`,
@@ -102,8 +107,20 @@ The old `protocol`, `mode`, `size`, `wm`, `xauth`, `allow_host_x11` and `allow_h
 `use = name …` (repeatable) – the `data/dep/NAME.profile` install recipes for this profile, run in this order. Each recipe runs
 once as an ordinary run of this profile (its userland read-only, its `$HOME`, your uid, its seccomp and terminal filter) with
 only the network and the command taken from the recipe, and is stamped on its own: a newly added dep installs on the next run;
-an edited recipe is refused until `holdfast run --refresh PROFILE` runs the recipes again. The recipe's `os` must equal this
+an edited recipe is refused until `holdfast run --refresh-dep=NAME PROFILE` runs that recipe again (`--refresh` runs all of
+them and rebuilds a changed userland). A dep whose `provides` files are gone from `$HOME` runs again by itself. The recipe's `os` must equal this
 profile's. A host-mode profile cannot use deps. Format, the exact list of overrides and `needs`: `docs/DATA.md`.
+
+## [commands]
+`NAME = argv` (shell-style quoting, like `command`). `holdfast run PROFILE NAME [-- ARGS…]` runs that argv, with ARGS
+appended, instead of `[profile] command`; `print` and `check` take the same NAME. Names match `[a-z0-9][a-z0-9_-]{0,31}`.
+Lets a project write `holdfast run ./tools/dev.profile build` without knowing where the tree is mounted:
+
+```ini
+[commands]
+build = sh /shared/tools/build.sh
+test  = sh /shared/tools/build.sh --test
+```
 
 ## Bundle mode: where the rest went
 There is no `[bundle]` section any more. The inline `provision` lines became `data/dep` recipes (`[deps] use`), and the userland

@@ -33,12 +33,14 @@ The same word, **refresh**, is used for bundles: `holdfast run --refresh PROFILE
 
 ## Search order
 
-First match wins: `$HOLDFAST_DATA`, `$HOLDFAST_SHARE/data`, `~/.config/holdfast/data`, `/etc/holdfast/data`, then ONE
+First match wins: `--data=DIR` (repeatable, command line), the profile's own `[profile] data` dirs (relative to the profile
+file, so a project can keep `os/` and `dep/` files next to its profile and run it from anywhere), `$HOLDFAST_DATA`,
+`$HOLDFAST_SHARE/data`, `~/.config/holdfast/data`, `/etc/holdfast/data`, then ONE
 shipped root: `data/` next to the binary (a checkout, or `/opt/holdfast` after `predep install`), else `/opt/holdfast/data`.
 A user file therefore overrides a shipped one of the same name. Profiles follow the same layout (`<root>/profile/`).
 The old `$HOLDFAST_PROFILES`, `~/.config/holdfast/profiles` and `/etc/holdfast/profiles` are not searched; a profile left
 there is an error that says where to move it.
-`holdfast list`, `holdfast list libs`, `holdfast list os` show what is visible.
+`holdfast list`, `holdfast list libs`, `holdfast list os` show what is visible; add `--data=DIR` to include a project's data.
 
 ## `data/lib/NAME.profile`
 
@@ -106,13 +108,15 @@ bind = /usr/lib/x86_64-linux-gnu/libpython3.11.so.1.0
 File lists are **generated, never hand-written**:
 
 ```sh
-HOLDFAST_DATA=./data holdfast libs --refresh          # on a debian 12 box: creates/updates data/os/debian-12.profile
-HOLDFAST_DATA=./data holdfast libs --check            # CI / after upgrades: exit 1 and a `+`/`-` diff if this host drifted
+holdfast libs --refresh --out=./data                  # on a debian 12 box: creates/updates ./data/os/debian-12.profile
+holdfast libs --data=./data --check                   # CI / after upgrades: exit 1 and a `+`/`-` diff if this host drifted
 holdfast libs                                          # print instead of saving (do not redirect onto the file it reads)
 ```
 
-`--refresh` always writes to `$HOLDFAST_DATA/os/` if set, else `~/.config/holdfast/data/os/NAME.profile`, never back into
-the shipped data (`/opt/holdfast/data`, a checkout). The user copy is searched first, so it shadows a shipped file.
+`--refresh` writes to `~/.config/holdfast/data/os/NAME.profile`, or to `DIR/os/` with `--out=DIR`; never back into the
+shipped data (`/opt/holdfast/data`, a checkout) and never into `$HOLDFAST_DATA` or a project's data dir unless you pass
+`--out`. The list describes one machine, so it only lands somewhere shared or committed when you say so. The user copy is
+searched first, so it shadows a shipped file.
 A lib that cannot be analysed on this host (e.g. a python with more than 50000 files) is reported and gets no file list;
 the others are still written, and the command exits 1.
 
@@ -129,11 +133,24 @@ branch built from source, a single script, a plugin). It replaces the old inline
 description = lazygit (sh-integration branch), built with Go
 os = alpine-3.24-dev                # the userland it is built for; the profile using it must name the same os
 needs = go                          # commands that must already exist in the userland; add their package to the data/os file
+provides = ~/go/bin/lazygit         # optional: what the recipe leaves in $HOME; if one is gone, the dep runs again
 [network]
 mode = pasta                        # none (the default) | pasta
 [install]
 run = go install github.com/jesseduffield/lazygit@sh-integration      # one shell line per `run`, in order
 ```
+
+`[install]` takes three kinds of steps, run in the order written:
+
+| key | what it does |
+|---|---|
+| `run = LINE` | one shell line |
+| `run_file = PATH` | a script kept next to the recipe (relative to its directory, may not lead outside it, also not via a symlink); its text is run as part of the recipe by `/bin/sh` and is part of the recipe's hash, so editing it counts as editing the recipe |
+| `fetch = https://URL SHA256 ~/DEST` | download to `$HOME/DEST` and check the sha256; a mismatch deletes the file and fails the recipe, a file already there with the right hash is kept. Needs `[network] mode = pasta` and `curl` in the userland. The URL, hash and path reach the shell as parameters, not as text |
+
+**Variables:** holdfast does not expand anything in a recipe. `$HOME`, `$PWD`, `$(…)` are the shell's, exactly as you
+would expect from a shell line (profile keys such as `[fs]` and `command` use holdfast's own variables; recipes do not).
+Recipes get no positional parameters of their own (`$1`… are taken by `fetch`).
 
 A profile opts in with `[deps] use = lazygit delta ...`. A dep is **an ordinary run of that profile**, produced by the same
 code that runs it day to day, so nothing about the sandbox is special-cased for installs:
@@ -156,8 +173,10 @@ What happens, per dep:
   so anything written elsewhere simply fails instead of silently landing in the shared rootfs.
 - `needs` is checked first, inside the userland, so a missing `go` is one clear sentence instead of a half-run build.
 - Each dep has its own stamp (`<data>/profiles/<name>/deps/<dep>.stamp`, a hash of the recipe, including its os and network, plus the home path). A dep you
-  add later installs on the next run; an edited recipe is refused until `holdfast run --refresh PROFILE`, which runs the
-  recipes again. Delete a stamp, or the folder, to force one.
+  add later installs on the next run; an edited recipe is refused until `holdfast run --refresh-dep=NAME PROFILE`, which runs
+  that recipe again (`--refresh` runs all of them). A stamp only says the recipe ran: list what it installs under `provides`
+  and a dep whose files were deleted from `$HOME` runs again by itself (`check`/`print` warn about it). After it runs, every
+  `provides` path must exist, or the run fails.
 - Recipes are trusted shell like any profile's `wm` line: read one before you use it. Deps are only for bundle mode.
 
 `holdfast list deps` shows what is available.
@@ -166,6 +185,16 @@ What happens, per dep:
 the whole userland, so that sandbox is deliberately different: the rootfs is writable, `--uid 0` makes it userns-root (your
 uid mapped to 0, no real privilege), and the network is pasta's (or none, see `[install]`). holdfast says so when it runs; it lives in
 `install_os_packages()` in `src/core/bundle.cpp`.
+
+When it fails: apk runs with `--no-progress`, so every package line is printed; its whole output is also kept in
+`<data>/bundles/<os>/rootfs/var/log/holdfast-apk.log`, and the last 60 lines are repeated after a failure.
+`holdfast os-shell PROFILE` opens a shell in exactly that sandbox (writable userland, userns-root, the `[install]`
+network) to try `apk add` by hand; `-n` prints its bwrap argv instead. What you change there is not tracked and affects every
+profile with the same `os` until `holdfast run --refresh` rebuilds the userland.
+
+The sandbox maps exactly one uid (yours, as 0). A package that ships files owned by another uid or gid (setuid helpers such
+as `linux-pam`'s `unix_chkpwd`) fails with `failed to preserve owner`; leave such packages out of `packages`. See
+`docs/DEFERRED.md`.
 
 ## `data/display/NAME.profile`
 
