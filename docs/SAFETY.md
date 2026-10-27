@@ -11,6 +11,7 @@ gaps in `docs/DEFERRED.md`. The things most worth knowing before you rely on it:
 - The Alpine hash comes from the same mirror as the tarball (integrity, not authenticity). Pin `alpine_sha256` in the `data/os` file for real supply-chain assurance.
 - bwrap is not a VM: kernel bugs reachable through the syscall surface apply. A default seccomp denylist (`bpf`, `io_uring`, `mount`, `keyctl`, `userfaultfd`, `TIOCSTI`, ...) is on unless the profile says `seccomp = none` or supplies its own `.bpf`. It is a denylist, not a full syscall allowlist.
 - `net = ivpn` uses `sudo` for the network setup only (see `docs/NETWORK.md`): the sandboxed program never has root, and holdfast revokes the sudo ticket it created when it exits. The ticket is live while the sandbox runs, because teardown needs it.
+- There is deliberately **no `/etc/machine-id`** in the sandbox: it is a stable identifier for your install that sites and logs could use to recognise you. The cost is that GLib/DBus cannot start the session or accessibility bus (browsers log `Failed to create DBus proxy for org.a11y.Bus ... without a machine-id`), so **accessibility / screen-reader support is off** inside sandboxed GUI apps. If an app really needs one, bind a random fake: `[fs] ro = /path/to/random-id-file => /etc/machine-id`.
 - `net = host` shares the host network namespace, including abstract unix sockets (e.g. X11). Prefer `net = pasta`.
 - Profiles and `data/dep` recipes are trusted code: `wm` lines and recipe `run` lines are shell run for you. Never use one you did not read.
 

@@ -73,6 +73,10 @@ namespace {
 
 const char* kXdgSub[] = {".config", ".cache", ".local/share", ".local/state", ".local/bin"};
 
+// Identity files are generated, never the host's. There is deliberately NO /etc/machine-id: it is a stable per-install
+// identifier (a fingerprinting handle, and it names the journal and the DBus machine). The cost: GLib/DBus cannot start a
+// session bus or the accessibility bus ("Cannot spawn a message bus without a machine-id", org.a11y.Bus), so screen-reader
+// support is off in sandboxed GUI apps. If an app genuinely needs one, bind a RANDOM file: [fs] ro = /path/to/fake => /etc/machine-id
 void mount_identity(ArgBuilder& b, const Profile& p, const PlanCtx& c) {
     const std::string U = p.fake_user;
     const std::string uid = std::to_string(c.user.uid), gid = std::to_string(c.user.gid);
@@ -180,7 +184,7 @@ void mount_bundle_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, std:
     }
     // /etc is rebuilt on a tmpfs: bundle files minus anything identity/network related.
     static const std::set<std::string> skip = {"passwd", "group", "shadow", "gshadow", "nsswitch.conf", "resolv.conf",
-                                               "hosts", "hostname", "machine-id", "mtab", "passwd-", "group-", "shadow-"};
+                                               "hosts", "hostname", "machine-id" /* see mount_identity: no stable host id */, "mtab", "passwd-", "group-", "shadow-"};
     etc_skip.insert(skip.begin(), skip.end());
     b.tmpfs("/etc");
     std::error_code ec;

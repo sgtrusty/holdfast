@@ -5,6 +5,13 @@
 #   holdfast run librewolf-ivpn
 #   holdfast net-test librewolf-ivpn      # verify the kill switch once after setup
 
+# Startup messages you will see and can ignore:
+#   Sandbox: CanCreateUserNamespace() ... ENOSPC   nested user namespaces are forbidden on purpose (see disable_userns below)
+#   Failed to create DBus proxy for org.a11y.Bus  there is deliberately no /etc/machine-id (a stable host identifier); without it
+#                                                 GLib/DBus cannot start the accessibility bus, so screen-reader support is off
+#   Could not load a pixbuf from icon theme        only the minimal Adwaita/hicolor icon sets are mounted; some icons are missing
+#   Lockstore error: DEK not found ... httpcache   LibreWolf looks for a cache encryption key that does not exist in the fresh,
+#                                                  tmpfs-only profile; the cache disappears on exit anyway
 [profile]
 name        = librewolf-ivpn
 description = Amnesic LibreWolf behind IVPN (netns + kill switch + Xephyr)
@@ -33,6 +40,7 @@ ro_try = /usr/share/icons/hicolor
 ro_try = /usr/share/icons/Adwaita
 ro_try = /usr/share/mime
 ro_try = /etc/fonts
+ro_try = /etc/i3                # i3 refuses to start without a config; the distro default is enough here
 tmpfs  = /tmp/lw              # ephemeral profile: gone when the sandbox exits
 
 [home]
