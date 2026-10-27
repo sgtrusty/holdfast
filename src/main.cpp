@@ -6,11 +6,13 @@
 #include <set>
 
 #include "cli/args.hpp"
+#include "cli/doctor.hpp"
 #include "core/bundle.hpp"
 #include "core/datadefs.hpp"
 #include "core/libs_cmd.hpp"
 #include "core/session.hpp"
 #include "util/log.hpp"
+#include "util/style.hpp"
 
 using namespace hf;
 
@@ -30,9 +32,17 @@ static int cmd_list(const Strings& a, bool verbose) {
     try { home = resolve_user().home.string(); } catch (...) {}
     const Strings roots = data_roots(home);
     if (a.size() > 1 || (!a.empty() && a[0] != "libs" && a[0] != "os" && a[0] != "deps")) throw Error("usage: holdfast list [libs|os|deps] [-v]");
+    // Piped output stays plain, headerless and one entry per line; on a terminal there is a header and colour.
+    const Style st = style_for(stdout);
+    bool header_done = false;
     auto line = [&](const std::string& name, const char* kind, const std::string& desc, const fs::path& file) {
-        std::printf("%-20s %-7s %s", name.c_str(), kind, desc.c_str());
-        if (verbose) std::printf("  [%s]", file.c_str());
+        if (st.tty && !header_done) {
+            header_done = true;
+            std::printf("%s%-20s %-7s %s%s\n", st.b, "NAME", "KIND", "DESCRIPTION", st.r);
+        }
+        const bool invalid = std::string(kind) == "INVALID";
+        std::printf("%-20s %s%-7s%s %s", name.c_str(), invalid ? st.x : "", kind, invalid ? st.r : "", desc.c_str());
+        if (verbose) std::printf("  %s[%s]%s", st.c, file.c_str(), st.r);
         std::printf("\n");
     };
     if (!a.empty()) {
@@ -85,6 +95,8 @@ int main(int argc, char** argv) {
         RunOptions& o = cli.run;
         const Strings& pos = cli.pos;
 
+        if (o.debug && cmd != "run" && cmd != "print") throw Error("--debug applies to `run` (open a shell in the sandbox) and `print` (show how)");
+
         if (cmd == "list") return cmd_list(pos, cli.verbose);
 
         if (cmd == "libs") {
@@ -109,7 +121,8 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "note: the Alpine userland is not set up yet; it is created the first time you run this profile\n");
             else
                 run_profile(p, o);
-            std::fprintf(stderr, "profile '%s' OK\n", p.name.c_str());
+            const Style st = style_for(stderr);
+            std::fprintf(stderr, "profile '%s' %sOK%s\n", p.name.c_str(), st.g, st.r);
             return 0;
         }
         if (cmd == "net-test") return net_test(p, o);

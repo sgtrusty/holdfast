@@ -152,7 +152,8 @@ dns → wg-quick up → wg-iface rules → verify`. Any exception → `down()` (
 ## 11. Error handling & exit codes
 `Error` → 1 · `PolicyError` → 3 · unexpected `std::exception` → 70 · usage → 2 · otherwise child status.
 All diagnostics go to stderr with `[hf]`, `[hf:WARN]`, `[hf:ERROR]` prefixes; stdout is reserved for
-`print`, `list`, `libs`.
+`print`, `list`, `libs`, `doctor`. Colour (classic SGR, `src/util/style.cpp`) is used only when the stream is a terminal,
+`NO_COLOR` is unset and `TERM` is not `dumb`; piped output is always plain.
 
 ## 12. Verification status (v0.1)
 

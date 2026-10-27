@@ -1,9 +1,13 @@
 // Minimal dependency-free test runner.
+#include <algorithm>
 #include <cstdio>
 #include <functional>
+#include <set>
 #include <unistd.h>
 
 #include "cli/args.hpp"
+#include "cli/doctor.hpp"
+#include "util/style.hpp"
 #include "core/plan.hpp"
 #include "core/elf.hpp"
 #include "core/libs.hpp"
@@ -491,6 +495,52 @@ int main() {
         THROWS(Error, parse_args("run", {"--bogus", "p"}));
         THROWS(Error, parse_args("run", {"--net=bogus", "p"}));
         CHECK(!handle_meta({"run"}).has_value());                                    // real commands are not meta commands
+    });
+
+    test("doctor: feature evaluation", [] {
+        auto find = [](const std::vector<FeatureStatus>& v, const std::string& name) {
+            for (const auto& f : v) if (f.name == name) return f;
+            return FeatureStatus{};
+        };
+        const std::set<std::string> some = {"pasta", "curl", "tar", "gzip", "sha256sum", "wl-copy"};
+        auto fs_ = evaluate_features([&](const std::string& t) { return some.count(t) != 0; });
+        CHECK(find(fs_, "net = pasta").ready());
+        CHECK(find(fs_, "bundle profiles").ready());
+        CHECK(find(fs_, "clipboard = out").ready());                                       // "xclip|wl-copy": either one is enough
+        FeatureStatus ivpn = find(fs_, "net = ivpn");
+        CHECK(!ivpn.ready() && std::find(ivpn.missing.begin(), ivpn.missing.end(), "wg-quick") != ivpn.missing.end());
+        CHECK(std::find(ivpn.missing.begin(), ivpn.missing.end(), "ip6tables") == ivpn.missing.end());   // optional tools never block
+        CHECK(std::find(ivpn.missing_optional.begin(), ivpn.missing_optional.end(), "ip6tables") != ivpn.missing_optional.end());
+        CHECK(!find(fs_, "display = xephyr").ready());
+        auto none = evaluate_features([](const std::string&) { return false; });
+        CHECK(none.size() == fs_.size());
+        FeatureStatus clip = find(none, "clipboard = out");
+        CHECK(!clip.ready() && clip.missing == Strings{"xclip|wl-copy"});
+        FeatureStatus bundle = find(none, "bundle profiles");
+        CHECK(bundle.missing.size() == 5 && bundle.missing[0] == "pasta");                 // pasta is listed once, first
+        auto all = evaluate_features([](const std::string&) { return true; });
+        for (const auto& f : all) CHECK(f.ready() && f.missing_optional.empty());
+    });
+
+    test("--debug: a shell in the exact sandbox", [] {
+        CHECK(parse_args("run", {"--debug", "p"}).run.debug);
+        CHECK(!parse_args("run", {"p"}).run.debug);
+        auto host = [](const std::string& bins) { return parse_profile("[profile]\nname=t\ncommand=nvim\n[bin]\nallow = " + bins + "\n", "t"); };
+        CHECK((debug_shell(host("nvim bash sh git")) == Strings{"bash"}));                  // bash preferred
+        CHECK((debug_shell(host("nvim sh")) == Strings{"sh"}));                             // else sh
+        CHECK((debug_shell(host("nvim sh=/usr/bin/dash")) == Strings{"sh"}));               // name=/path tokens count
+        THROWS(Error, debug_shell(host("nvim git")));                                       // never adds a binary to the sandbox
+        THROWS(Error, debug_shell(host("bashful")));                                        // exact names only
+        Profile b = parse_profile("[profile]\nname=t\nmode=bundle\ncommand=lazygit\n", "t");
+        Strings s = debug_shell(b);
+        CHECK(s.size() == 3 && s[0] == "/bin/sh" && s[1] == "-c" && s[2].find("exec bash") != std::string::npos && s[2].find("exec sh") != std::string::npos);
+    });
+
+    test("style: colour is off on request", [] {
+        setenv("NO_COLOR", "1", 1);
+        Style off = style_for(stdout);
+        CHECK(std::string(off.b).empty() && std::string(off.r).empty() && std::string(off.g).empty() && std::string(off.x).empty());
+        unsetenv("NO_COLOR");
     });
 
     test("xauth file format", [] {

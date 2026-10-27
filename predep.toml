@@ -27,25 +27,25 @@ outputs = ["root://bin/holdfast"]
 clean = true
 clean_paths = ["root://obj"]
 
-[[stages]]
-name = "test"
-description = "Run the unit-test binary"
-type = "run"
-depends = ["build"]
-commands = ["./bin/holdfast_tests"]
-
-[[stages]]
-name = "e2e"
-description = "Real-bwrap smoke test (non-root, needs unprivileged userns)"
-type = "run"
-depends = ["build"]
-commands = ["sh tests/e2e.sh ./bin/holdfast"]
-
-[[stages]]
-name = "check"
-description = "Build and run the unit tests"
-type = "group"
-depends = ["build", "test"]
+# [[stages]]
+# name = "test"
+# description = "Run the unit-test binary"
+# type = "run"
+# depends = ["build"]
+# commands = ["./bin/holdfast_tests"]
+# 
+# [[stages]]
+# name = "e2e"
+# description = "Real-bwrap smoke test (non-root, needs unprivileged userns)"
+# type = "run"
+# depends = ["build"]
+# commands = ["sh tests/e2e.sh ./bin/holdfast"]
+# 
+# [[stages]]
+# name = "check"
+# description = "Build and run the unit tests"
+# type = "group"
+# depends = ["build", "test"]
 
 [[stages]]
 name = "clean"

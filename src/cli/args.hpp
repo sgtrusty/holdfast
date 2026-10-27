@@ -20,6 +20,7 @@ struct Cli {
     bool yes = false;         // -y: also used by purge confirmations
     bool refresh = false;     // --refresh: rebuild a bundle / rewrite an OS file list
     bool check = false;       // --check: libs, compare instead of write
+                              // --debug is in run.debug (run/print only; main rejects it elsewhere)
 };
 
 // Prints the help text. Colour (classic SGR: bold, cyan) only when `f` is a terminal, NO_COLOR is unset and TERM != dumb.

@@ -99,9 +99,29 @@ void validate_profile(const Profile& p, bool has_cmd) {
     if (p.display == DisplayMode::None && p.audio) log::warn("audio without display: allowed, but unusual");
 }
 
-int run_profile(Profile p, const RunOptions& o) {
+Strings debug_shell(const Profile& p) {
+    if (p.root == RootMode::Bundle)   // constant script, nothing interpolated
+        return {"/bin/sh", "-c", "if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi"};
+    auto allowed = [&](const std::string& n) {
+        for (const auto& t : p.bins) if (t.substr(0, t.find('=')) == n) return true;
+        return false;
+    };
+    if (allowed("bash")) return {"bash"};
+    if (allowed("sh")) return {"sh"};
+    throw Error(cat("--debug needs a shell inside the sandbox: add 'bash' (or 'sh') to [bin] allow of profile '", p.name,
+                    "' (and, with libs = minimal, a [libs] use that provides it)"));
+}
+
+int run_profile(Profile p, RunOptions o) {
     if (o.net) p.net = *o.net;
     if (o.wg_conf) p.wg_conf = *o.wg_conf;
+    if (o.debug) {
+        if (!o.command.empty()) throw Error("--debug replaces the command with a shell; drop the words after `--`");
+        o.command = debug_shell(p);
+        p.env_set.emplace_back("PS1", cat("(holdfast:", p.name, ") \\w\\$ "));   // so you can tell which sandbox you are in
+        log::info(cat("debug: running ", o.command[0] == "/bin/sh" ? "bash (or sh)" : o.command[0], " in the sandbox of '", p.name,
+                      "' instead of its command; everything else is exactly what the profile gets"));
+    }
     validate_profile(p, !o.command.empty());
     Prepared pr = prepare(p);
 
@@ -191,41 +211,6 @@ void net_cleanup(const std::string& ns_name) {
     User u = resolve_user();
     Paths p = make_paths(u, "x");
     NetNs::cleanup_stale(u, ns_name, p.run_root);
-}
-
-int doctor() {
-    int bad = 0;
-    auto row = [&](const std::string& what, bool ok, const std::string& hint, bool required) {
-        std::fprintf(stderr, "  [%s] %-28s %s\n", ok ? " ok " : (required ? "FAIL" : "warn"), what.c_str(), ok ? "" : hint.c_str());
-        if (!ok && required) ++bad;
-    };
-    try {                                                           // plain folders: open, edit or delete them yourself
-        const User u = resolve_user();
-        std::fprintf(stderr, "where things live:\n  state, bundles, caches: %s\n  data files searched:    %s\n",
-                     make_paths(u, "x").data.c_str(), join(data_roots(u.home.string()), ", ").c_str());
-    } catch (const Error&) {}
-    std::fprintf(stderr, "core:\n");
-    auto bw = which("bwrap");
-    row("bwrap", bw.has_value(), "apt install bubblewrap", true);
-    if (bw) {
-        auto v = bwrap_version(*bw);
-        row("bwrap >= 0.8 (--disable-userns)", v.at_least(0, 8, 0), "older bwrap works; nested userns not blocked", false);
-        auto r = run({bw->string(), "--unshare-user", "--ro-bind", "/", "/", "true"}, true);
-        row("unprivileged user namespaces", r.ok(),
-            "kernel/AppArmor blocks them (Ubuntu 24.04: kernel.apparmor_restrict_unprivileged_userns=0 or an AppArmor profile for bwrap)", true);
-    }
-    row("setpriv", which("setpriv").has_value(), "util-linux", false);
-    row("seccomp filter (built in)", seccomp_available(), "rebuilt without libseccomp: profiles must set `seccomp = none` or a custom .bpf", false);
-    row("pasta", which("pasta").has_value(), "package passt; required for [network] mode=pasta and for setting up a bundle profile", false);
-    std::fprintf(stderr, "bundle mode (first run fetches the userland inside a sandbox):\n");
-    for (auto t : {"curl", "tar", "gzip", "sha256sum"}) row(t, which(t).has_value(), "needed on the host to fetch a bundle userland", false);
-    std::fprintf(stderr, "ivpn mode:\n");
-    for (auto t : {"ip", "iptables", "wg-quick", "wg", "ping", "sudo"}) row(t, which(t).has_value(), "required for [network] mode=ivpn", false);
-    row("ip6tables", which("ip6tables").has_value(), "recommended (IPv6 defence in depth)", false);
-    std::fprintf(stderr, "display / extras:\n");
-    row("Xephyr", which("Xephyr").has_value(), "xserver-xephyr, for [display] mode=xephyr", false);
-    row("xclip or wl-copy", which("xclip").has_value() || which("wl-copy").has_value(), "for [clipboard] mode=out", false);
-    return bad ? 1 : 0;
 }
 
 }  // namespace hf

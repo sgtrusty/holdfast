@@ -1,22 +1,10 @@
 #include "cli/args.hpp"
 
-#include <unistd.h>
-
-#include <cstdlib>
-#include <cstring>
+#include "util/style.hpp"
 
 namespace hf {
 
 namespace {
-
-// Classic SGR only (bold, cyan, reset), and only when the stream is a terminal that wants colour.
-struct Ansi { const char *b = "", *c = "", *r = ""; };
-
-Ansi ansi_for(FILE* f) {
-    const char* term = std::getenv("TERM");
-    if (!isatty(fileno(f)) || std::getenv("NO_COLOR") || (term && std::strcmp(term, "dumb") == 0)) return {};
-    return {"\033[1m", "\033[36m", "\033[0m"};
-}
 
 NetMode parse_net(const std::string& m) {
     if (m == "none") return NetMode::None;
@@ -29,7 +17,7 @@ NetMode parse_net(const std::string& m) {
 }  // namespace
 
 void print_usage(FILE* f) {
-    const Ansi a = ansi_for(f);
+    const Style a = style_for(f);
     auto head = [&](const char* t) { std::fprintf(f, "\n%s%s%s\n", a.b, t, a.r); };
     // The name column is padded as plain text: the escape codes are separate arguments outside the padded field.
     auto row = [&](const char* name, const char* desc) { std::fprintf(f, "  %s%-34s%s %s\n", a.c, name, a.r, desc); };
@@ -61,6 +49,7 @@ void print_usage(FILE* f) {
     row("--cwd=DIR, --no-cwd", "mount DIR / mount no working tree");
     row("--net=none|pasta|host|ivpn", "override the profile's network mode");
     row("--wg=FILE", "WireGuard config (ivpn)");
+    row("--debug", "run: open bash (or sh) in the sandbox, not the command");
     row("-n, --dry-run", "same as print");
     row("--refresh", "run: redo changed userland / deps; libs: rewrite list");
     row("--check", "libs: exit 1 if the saved list is stale");
@@ -92,6 +81,7 @@ Cli parse_args(const std::string& cmd, const Strings& rest) {
         else if (a == "--no-cwd") c.run.no_cwd = true;
         else if (a == "--refresh") { c.refresh = true; c.run.refresh = true; }
         else if (a == "--check") c.check = true;
+        else if (a == "--debug") c.run.debug = true;
         else if (a.rfind("--net=", 0) == 0) c.run.net = parse_net(a.substr(6));
         else if (a.rfind("--wg=", 0) == 0) c.run.wg_conf = a.substr(5);
         else if (a.rfind("--cwd=", 0) == 0) c.run.cwd = a.substr(6);

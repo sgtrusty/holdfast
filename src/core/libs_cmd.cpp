@@ -7,6 +7,7 @@
 #include "core/datadefs.hpp"
 #include "core/libs.hpp"
 #include "util/log.hpp"
+#include "util/style.hpp"
 #include "util/sys.hpp"
 
 namespace hf {
@@ -52,7 +53,11 @@ int cmd_libs(const std::string& name_arg, bool check, bool refresh) {
         const std::map<std::string, Strings> empty;
         const auto& have = it == old->files.end() ? empty : it->second;
         size_t diff = 0;
-        auto emit = [&](const char* sign, const std::string& lib, const std::string& path) { std::printf("%s %s: %s\n", sign, lib.c_str(), path.c_str()); ++diff; };
+        const Style st = style_for(stdout);                          // + green, - red on a terminal; plain when piped
+        auto emit = [&](const char* sign, const std::string& lib, const std::string& path) {
+            std::printf("%s%s%s %s: %s\n", sign[0] == '+' ? st.g : st.x, sign, st.r, lib.c_str(), path.c_str());
+            ++diff;
+        };
         for (const auto& [lib, want] : fresh) {
             const auto h = have.find(lib);
             if (h == have.end()) { emit("+", lib, "(no file list saved yet)"); continue; }

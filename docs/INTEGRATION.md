@@ -24,6 +24,9 @@ holdfast run [options] PROFILE [-- COMMAND [ARGS...]]
 - Useful options: `-y` (do not ask before mounting the working tree), `--cwd=DIR` (mount DIR, implies yes),
   `--no-cwd`, `--net=none|pasta|host|ivpn`, `-n` (same as `print`), `-v`.
 - Dry runs: `holdfast print PROFILE` shows the exact `bwrap` argv and changes nothing; `holdfast check PROFILE` validates.
+- Debugging a profile: `holdfast run --debug PROFILE` opens `bash` (else `sh`) in that exact sandbox instead of its command:
+  same mounts, network, seccomp and terminal filter, nothing added. A host profile needs `bash` or `sh` in `[bin] allow`.
+  `holdfast print --debug PROFILE` shows the argv it would use. Not for scripts: it is an interactive shell.
 - State and data locations can be overridden for tests and CI: `HOLDFAST_HOME` (state), `HOLDFAST_PROFILES`, `HOLDFAST_DATA`.
 
 ## Calling it

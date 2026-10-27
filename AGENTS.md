@@ -29,7 +29,7 @@ The build is described in `premake5.lua`; `predep.toml` declares the `build`/`te
 5. **Kill switch before tunnel.** In `NetNs::up()` the default-DROP policy must be installed before `wg-quick up`. Host rules stay scoped to `endpoint:port/udp`.
 6. **Cleanup is RAII and idempotent.** Anything created in `run_profile` (netns, X server, session dir, rules, sysctl) must be undone by a destructor, and by `net-cleanup` if it can outlive the process. Validate names (`valid_ns_name`) before any `rm -rf`.
 7. **Bind order**: parents before children; the `.git` read-only binds must come after the rw bind of the tree.
-8. **stdout is data** (`print`, `list`, `libs`); logs go to stderr via `hf::log`.
+8. **stdout is data** (`print`, `list`, `libs`, `doctor`); logs go to stderr via `hf::log`.
 9. Files written for the sandbox use `write_file`/`make_private_dir` (0600/0700 and root→user chown when run via sudo).
 10. bwrap takes the **command on the real argv**, not from `--args` (verified); keep `ArgBuilder::cmd()` separate.
 
