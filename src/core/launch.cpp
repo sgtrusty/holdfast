@@ -12,6 +12,22 @@ fs::path find_bwrap() {
     throw Error("bubblewrap (bwrap) not found; install it (e.g. apt install bubblewrap)");
 }
 
+fs::path find_pasta() {
+    if (auto p = which("pasta")) return *p;
+    throw Error("pasta not found; install passt (apt/dnf/pacman: passt) or choose another [network] mode");
+}
+
+std::string pasta_resolv_conf() { return cat("nameserver ", kPastaDns, "\n"); }
+
+Strings pasta_argv(const fs::path& pasta, const Strings& inner) {
+    // -t/-u: no inbound port forwarding; -T/-U: sandbox cannot connect to host loopback services;
+    // --no-map-gw: the gateway address does not reach the host either.
+    Strings v = {pasta.string(), "--config-net", "--no-map-gw", "-t", "none", "-u", "none", "-T", "none", "-U", "none",
+                 "--dns-forward", kPastaDns, "--"};
+    v.insert(v.end(), inner.begin(), inner.end());
+    return v;
+}
+
 bool BwrapVersion::at_least(int a, int b, int c) const {
     if (major != a) return major > a;
     if (minor != b) return minor > b;

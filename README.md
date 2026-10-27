@@ -16,7 +16,7 @@ profile parsing that fails closed, and a considerably hardened network setup
 
 ```
 holdfast run lazyvim              # offline editor, current dir mounted at /shared, .git read-only
-holdfast run --net=host lazyvim   # same, online ("sync" mode)
+holdfast run --net=pasta lazyvim  # same, online ("sync" mode) through a private pasta netns
 holdfast run librewolf-ivpn       # amnesic browser, nested X, all traffic via WireGuard netns
 holdfast bundle setup lazygit-dev # one-time: fetch+verify Alpine, apk add, build tools
 holdfast run lazygit-dev          # run inside the private Alpine userland
@@ -51,13 +51,14 @@ premake5 gmake && make config=release -j$(nproc)     # -> bin/holdfast
 
 Requirements: Linux, C++20 compiler, `premake5` (any recent 5.x), `make`,
 `predep`, and `bwrap` (tested with 0.9.0; ≥ 0.8 needed for `--disable-userns`).
-No third-party C++ libraries. Run `holdfast doctor` to see which optional
+Build dependency: `libseccomp` headers (`libseccomp-dev`/`libseccomp-devel`) for the default seccomp filter;
+`HOLDFAST_SECCOMP=OFF` builds without it (profiles must then say `seccomp = none`). Run `holdfast doctor` to see which optional
 features your host supports.
 
 > **Warnings are errors.** The build enables `-Werror` by default to keep the
 > "zero warnings" bar. To relax it for a local build: `HOLDFAST_WERROR=OFF predep`.
 
-Optional runtime tools: `curl tar sha256sum` (bundle), `ip iptables wg-quick wg ping sudo setpriv`
+Optional runtime tools: `pasta` from `passt` (`[network] mode=pasta`, and `bundle setup`), `curl tar sha256sum` (bundle), `ip iptables wg-quick wg ping sudo setpriv`
 (ivpn), `Xephyr` (nested display), `xclip` or `wl-copy` (clipboard).
 
 > **Ubuntu 24.04+**: AppArmor blocks unprivileged user namespaces for bwrap by
@@ -72,10 +73,10 @@ Looked up by name in `$HOLDFAST_PROFILES`, `~/.config/holdfast/profiles/`,
 Examples live in `profiles/`; `holdfast init NAME > ~/.config/holdfast/profiles/NAME.profile`.
 
 **Userland modes**
-- `mode = host` – a tmpfs root is assembled from: libraries (`/usr/lib*`, read-only), each binary in `[bin] allow` bound individually at `/usr/bin/<name>`, plus the files you list in `[fs]`. Anything not listed does not exist.
+- `mode = host` – a tmpfs root is assembled from: the shared libraries each allowed binary needs (`libs = minimal`, default; `libs = full` binds `/usr/lib*` read-only instead), each binary in `[bin] allow` bound individually at `/usr/bin/<name>`, plus the files you list in `[fs]`. Anything not listed does not exist.
 - `mode = bundle` – the userland is `~/.local/share/holdfast/profiles/<name>/rootfs`, an Alpine minirootfs downloaded over HTTPS, sha256-verified (optionally pinned), extracted unprivileged, then provisioned (`apk add`, your `provision` lines) in a network-enabled, writable stage. Day-to-day runs mount it read-only.
 
-**Network** – `none` (default, fresh empty netns), `host`, or `ivpn` (WireGuard inside `hf-<profile>`, see below).
+**Network** – `none` (default, fresh empty netns), `pasta` (private netns with outbound internet; host loopback and abstract sockets unreachable), `host` (shares the host netns, **including abstract unix sockets such as X11**; avoid), or `ivpn` (WireGuard inside `hf-<profile>`, see below).
 
 **Display** – `none`, `xephyr` (private nested X server with a random cookie; only its socket enters the sandbox), or `host` (requires `allow_host_x11 = yes`, because it hands over your keyboard and screen).
 
@@ -114,7 +115,7 @@ direct veth path is blocked, traffic dies when the wg interface is down, policy 
 - The `.git` guard protects history/hooks of repos that exist at launch. It does not stop the sandbox from writing a hostile `Makefile`/`.envrc`/IDE task that *you* later run outside.
 - Bundle provisioning runs **with network** and trusts the packages/commands in your profile.
 - The Alpine hash comes from the same mirror as the tarball (integrity, not authenticity). Pin `alpine_sha256` for real supply-chain assurance.
-- bwrap is not a VM: kernel bugs reachable through the syscall surface apply. A built-in seccomp filter is on the roadmap; meanwhile `[profile] seccomp = file.bpf` loads yours.
+- bwrap is not a VM: kernel bugs reachable through the syscall surface apply. A default seccomp denylist (`bpf`, `io_uring`, `mount`, `keyctl`, `userfaultfd`, `TIOCSTI`, ...) is on unless the profile says `seccomp = none` or supplies its own `.bpf`; it is a denylist, not a full syscall allowlist.
 
 See `docs/THREAT_MODEL.md` for scope and `docs/SPEC.md` for the technical design.
 

@@ -15,7 +15,7 @@ Mount syntax: `SRC` or `SRC => DEST` (DEST defaults to SRC). Globs (`* ? [..]`) 
 | hostname | `holdfast` | UTS hostname inside |
 | new_session | `yes` | `bwrap --new-session` (blocks TIOCSTI; Ctrl-C then hits holdfast, not the inner program) |
 | disable_userns | `yes` | `--disable-userns` when bwrap ≥ 0.8 |
-| seccomp | | path to a compiled BPF filter, loaded with `--seccomp` |
+| seccomp | `default` | `default` (built-in libseccomp filter, see below) · `none` (no filter, warns) · path to a compiled BPF file. A build without libseccomp refuses `default`. |
 | cwd | `ask` | `none` / `ask` (tty prompt) / `yes`; mounts the current dir at `cwd_dest` |
 | cwd_dest | `/shared` | absolute, not under `/usr /etc /bin /lib /proc /dev /sys /run /var` |
 
@@ -30,7 +30,7 @@ Mount syntax: `SRC` or `SRC => DEST` (DEST defaults to SRC). Globs (`* ? [..]`) 
 | tmpfs | extra tmpfs mount |
 | deny | extra deny-list path (globs ok) |
 | defaults | `yes`: bind ld.so.cache, terminfo, zoneinfo, ssl, ca-certificates, os-release (+resolv.conf if networked) |
-| libs | `yes`: bind `/usr/lib /usr/lib64` read-only (host mode) |
+| libs | `minimal` (default): bind only the shared libraries the allowed binaries need (ELF `DT_NEEDED`, resolved transitively, nothing executed) plus a built-in map of runtime data dirs (python stdlib, `git-core`, nvim runtime, NSS modules). Unresolvable libs or toolchain commands (`gcc cc g++ ld lld clang rustc cargo`) are an error that tells you to use `full`; there is no automatic fallback. `full`: bind `/usr/lib /usr/lib64` (and `/lib*`) read-only. Anything `dlopen`ed that is not in the map needs an `[fs] ro_try` entry, or `libs = full`. |
 
 ## [home]
 `user` (fake login name, default `sandbox`) · `dirs` (create in fake home) · `bind = REL [=> REL]` (rw, from real `$HOME`) · `ro_bind` (same, read-only).
@@ -41,7 +41,17 @@ The fake home is persistent at `<data>/profiles/<name>/home`.
 The environment is otherwise cleared.
 
 ## [network]
-`mode = none|host|ivpn` · `wg_conf` (ivpn) · `ns_name` (default `hf-<name>`) · `subnet` (1-254, default derived) · `verify = yes|no`.
+`mode = none|pasta|host|ivpn` · `wg_conf` (ivpn) · `ns_name` (default `hf-<name>`) · `subnet` (1-254, default derived) · `verify = yes|no`.
+
+`pasta`: private network namespace with outbound internet via `pasta` (package `passt`). Host loopback services and
+inbound ports are unreachable, and host *abstract* unix sockets (X11, D-Bus) are not shared. `host` shares the host
+network namespace and therefore those sockets: prefer `pasta`. The LAN is reachable in both.
+
+### Default seccomp filter
+`seccomp = default` returns EPERM for: kexec/module/reboot, `bpf`, `perf_event_open`, `userfaultfd`, `io_uring_*`,
+`keyctl`/`add_key`/`request_key`, `mount` and the new-mount API, `pivot_root`, `open_by_handle_at`, clock setting,
+legacy x86 calls (`modify_ldt`, `iopl`, ...), plus the `TIOCSTI`/`TIOCLINUX` ioctls. `clone`, `clone3`, `unshare`,
+`setns` and `ptrace` stay allowed (browsers, nested sandboxes, debuggers). Foreign-ABI syscalls are killed.
 
 ## [display]
 `mode = none|xephyr|host` · `size = WxH` · `wm = <shell snippet started in background before the command>` ·

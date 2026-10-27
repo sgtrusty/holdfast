@@ -34,6 +34,22 @@ if _OPTIONS["no-werror"] then
   werror = false
 end
 
+-- The default seccomp filter needs libseccomp (libseccomp-dev / libseccomp-devel). It is ON by default;
+-- without it, profiles that keep the default `seccomp = default` refuse to start (fail closed).
+--   HOLDFAST_SECCOMP=OFF predep       (or: premake5 gmake --no-seccomp)
+newoption {
+  trigger = "no-seccomp",
+  description = "Build without libseccomp (the default seccomp filter becomes unavailable)",
+}
+local seccomp = true
+local senv = os.getenv("HOLDFAST_SECCOMP")
+if senv == "OFF" or senv == "0" or senv == "off" then
+  seccomp = false
+end
+if _OPTIONS["no-seccomp"] then
+  seccomp = false
+end
+
 -- Shared, project-wide compiler settings (mirrors CMake target_compile_options
 -- on holdfast_core, which were PUBLIC).
 local WARN = {
@@ -48,6 +64,13 @@ local SHARED_DEFINES = {
   'HOLDFAST_VERSION="0.1.0"',
   'HOLDFAST_SHARE_DIR="/usr/local/share/holdfast"',
 }
+if seccomp then
+  table.insert(SHARED_DEFINES, "HOLDFAST_HAVE_SECCOMP=1")
+end
+local SYSLIBS = { "pthread" }
+if seccomp then
+  table.insert(SYSLIBS, "seccomp")
+end
 
 -- Static core library: every translation unit under src/ except the executable
 -- entry point (main.cpp), compiled once and linked by both the binary and the
@@ -61,7 +84,7 @@ project("holdfast_core")
   includedirs({ "src" })
   files({ "src/**.cpp" })
   removefiles({ "src/main.cpp" })
-  links({ "pthread" })
+  links(SYSLIBS)
   buildoptions(WARN)
   defines(SHARED_DEFINES)
   filter("configurations:release")
@@ -85,7 +108,8 @@ local function executable(name, srcs, with_relro)
     targetdir("bin")
     includedirs({ "src" })
     files(srcs)
-    links({ "holdfast_core", "pthread" })
+    links({ "holdfast_core" })
+    links(SYSLIBS)
     buildoptions(WARN)
     defines(SHARED_DEFINES)
     if with_relro then

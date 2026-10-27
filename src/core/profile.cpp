@@ -81,7 +81,10 @@ Profile parse_profile(const std::string& text, const std::string& o) {
             else if (k == "hostname") p.hostname = v;
             else if (k == "new_session") p.new_session = as_bool(l, o);
             else if (k == "disable_userns") p.disable_userns = as_bool(l, o);
-            else if (k == "seccomp") p.seccomp = v;
+            else if (k == "seccomp") {
+                if (v.empty()) bad(l, o, "expected default|none|/path/to/filter.bpf");
+                p.seccomp = v;
+            }
             else if (k == "cwd") {
                 std::string x = lower(v);
                 if (x == "none") p.cwd = CwdMode::None;
@@ -101,7 +104,12 @@ Profile parse_profile(const std::string& text, const std::string& o) {
             else if (k == "tmpfs") p.tmpfs.push_back(v);
             else if (k == "deny") p.extra_deny.push_back(v);
             else if (k == "defaults") p.fs_defaults = as_bool(l, o);
-            else if (k == "libs") p.libs = as_bool(l, o);
+            else if (k == "libs") {
+                std::string x = lower(v);
+                if (x == "minimal") p.libs = LibsMode::Minimal;
+                else if (x == "full") p.libs = LibsMode::Full;
+                else bad(l, o, "expected minimal|full (the old yes|no is gone)");
+            }
             else bad(l, o, "unknown key");
         } else if (s == "home") {
             if (k == "user") p.fake_user = v;
@@ -123,8 +131,9 @@ Profile parse_profile(const std::string& text, const std::string& o) {
                 std::string x = lower(v);
                 if (x == "none") p.net = NetMode::None;
                 else if (x == "host") p.net = NetMode::Host;
+                else if (x == "pasta") p.net = NetMode::Pasta;
                 else if (x == "ivpn" || x == "wireguard") p.net = NetMode::Ivpn;
-                else bad(l, o, "expected none|host|ivpn");
+                else bad(l, o, "expected none|pasta|host|ivpn");
             }
             else if (k == "wg_conf") p.wg_conf = v;
             else if (k == "ns_name") p.ns_name = v;

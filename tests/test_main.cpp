@@ -4,6 +4,10 @@
 #include <unistd.h>
 
 #include "core/plan.hpp"
+#include "core/elf.hpp"
+#include "core/libs.hpp"
+#include "core/launch.hpp"
+#include "core/seccomp.hpp"
 #include "ui/display.hpp"
 #include "net/netns.hpp"
 #include "util/sys.hpp"
@@ -184,6 +188,53 @@ int main() {
         CHECK(!parse_profile("[profile]\nname=t\ncommand=sh\n[clipboard]\nmode=out\nsanitize=no\n", "t").clipboard_sanitize);
     });
 
+    test("profile: pasta, libs, seccomp keys", [] {
+        Profile d = parse_profile("[profile]\nname=t\ncommand=sh\n", "t");
+        CHECK(d.libs == LibsMode::Minimal && d.seccomp == "default" && d.net == NetMode::None);
+        Profile p = parse_profile("[profile]\nname=t\ncommand=sh\nseccomp=none\n[fs]\nlibs=full\n[network]\nmode=pasta\n", "t");
+        CHECK(p.libs == LibsMode::Full && p.seccomp == "none" && p.net == NetMode::Pasta);
+        THROWS(ProfileError, parse_profile("[profile]\nname=t\ncommand=sh\n[fs]\nlibs=yes\n", "t"));
+    });
+
+    test("elf: DT_NEEDED of this very binary", [] {
+        auto e = read_elf_deps(fs::canonical("/proc/self/exe"));
+        CHECK(e.has_value());
+        if (e) {
+            CHECK(!e->interp.empty() || !e->needed.empty());
+            bool libc = false;
+            for (auto& n : e->needed) if (n.rfind("libc.", 0) == 0) libc = true;
+            CHECK(libc);
+        }
+        char tmpl[] = "/tmp/hf-elf-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        write_file(d + "/script", "#!/bin/sh\n", 0755);
+        CHECK(!read_elf_deps(d + "/script").has_value());          // scripts are not ELF
+        fs::remove_all(d);
+    });
+
+    test("minimal libs: toolchains need libs = full", [] {
+        User u = fake_user();
+        Policy pol(u, {});
+        THROWS(Error, resolve_minimal_libs({{"gcc", "/usr/bin/gcc"}}, pol));
+    });
+
+    test("seccomp denylist", [] {
+        const Strings& d = seccomp_denylist();
+        auto has = [&](const char* n) { for (auto& x : d) if (x == n) return true; return false; };
+        CHECK(has("bpf") && has("mount") && has("io_uring_setup") && has("keyctl"));
+        CHECK(!has("clone3") && !has("clone") && !has("unshare") && !has("ptrace"));   // see seccomp.cpp
+#ifdef HOLDFAST_HAVE_SECCOMP
+        char tmpl[] = "/tmp/hf-sc-XXXXXX";
+        std::string dir = mkdtemp(tmpl);
+        write_default_seccomp(dir + "/f.bpf");
+        auto sz = fs::file_size(dir + "/f.bpf");
+        CHECK(sz > 0 && sz % 8 == 0);                              // array of 8-byte sock_filter instructions
+        fs::remove_all(dir);
+#else
+        THROWS(Error, write_default_seccomp("/tmp/never"));
+#endif
+    });
+
     test("xauth file format", [] {
         char tmpl[] = "/tmp/hf-xa-XXXXXX";
         std::string d = mkdtemp(tmpl);
@@ -222,6 +273,27 @@ int main() {
         c.network = true;
         Plan pl2 = build_plan(p, c);
         CHECK(has_seq(pl2.b.args(), {"--share-net"}));
+        CHECK(has_seq(pl2.b.args(), {"--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"}));
+        CHECK(!has_seq(pl2.b.args(), {"--uid"}));
+        // libs = minimal (default): no whole library directories, but the loader's libc is there
+        CHECK(!has_seq(a, {"--ro-bind", "/usr/lib", "/usr/lib"}));
+        if (auto e = read_elf_deps(fs::canonical(*which("sh"))); e && !e->needed.empty()) {
+            bool libc = false;
+            for (size_t i = 0; i + 2 < a.size(); ++i)
+                if (a[i] == "--ro-bind" && fs::path(a[i + 2]).filename().string().rfind("libc.", 0) == 0) libc = true;
+            CHECK(libc);
+        }
+#ifdef HOLDFAST_HAVE_SECCOMP
+        CHECK(pl.seccomp == c.session / "seccomp.bpf" && fs::exists(pl.seccomp));
+#endif
+        // pasta: its own resolv.conf (a host stub on 127.0.0.x would be unreachable) and a pinned uid/gid
+        c.pasta = true;
+        Plan pl3 = build_plan(p, c);
+        CHECK(has_seq(pl3.b.args(), {"--ro-bind", c.session.string() + "/resolv.conf", "/etc/resolv.conf"}));
+        CHECK(has_seq(pl3.b.args(), {"--uid", "1000", "--gid", "1000"}));
+        CHECK(read_file(c.session / "resolv.conf") == pasta_resolv_conf());
+        Strings pa = pasta_argv("/usr/bin/pasta", {"sh", "-c", "x"});
+        CHECK(has_seq(pa, {"-T", "none", "-U", "none"}) && has_seq(pa, {"--no-map-gw"}) && has_seq(pa, {"--", "sh", "-c", "x"}));
         fs::remove_all(d);
     });
 

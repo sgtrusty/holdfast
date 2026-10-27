@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <set>
 
+#include "core/launch.hpp"
+#include "core/libs.hpp"
+#include "core/seccomp.hpp"
 #include "util/log.hpp"
 #include "util/sys.hpp"
 
@@ -86,20 +89,33 @@ void mount_identity(ArgBuilder& b, const Profile& p, const PlanCtx& c) {
     b.ro_bind(c.session / "hosts", "/etc/hosts");
 }
 
+// resolv.conf: the host's, or (pasta) one that points at pasta's DNS forwarder, because a host stub
+// resolver on 127.0.0.x is not reachable from inside the private namespace.
+void bind_resolv_conf(ArgBuilder& b, const PlanCtx& c) {
+    if (c.pasta) {
+        write_file(c.session / "resolv.conf", pasta_resolv_conf(), 0644);
+        b.ro_bind(c.session / "resolv.conf", "/etc/resolv.conf");
+    } else if (fs::exists("/etc/resolv.conf")) {
+        b.ro_bind("/etc/resolv.conf", "/etc/resolv.conf");
+    }
+}
+
 void mount_host_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, const VarCtx& vc) {
     b.dir("/usr/bin");
     b.symlink("usr/bin", "/bin").symlink("usr/bin", "/sbin").symlink("usr/bin", "/usr/sbin");
 
-    if (p.libs) {  // shared libraries only; binaries are whitelisted one by one below
+    // usr-merge symlinks are needed in both modes (the dynamic loader path in every ELF goes through them);
+    // whole library directories only in `libs = full`.
+    for (const char* l : {"/lib", "/lib64"}) {
+        std::error_code ec;
+        if (fs::is_symlink(l, ec)) { if (fs::exists(l, ec)) b.symlink(fs::read_symlink(l).string(), l); }
+        else if (fs::is_directory(l, ec) && p.libs == LibsMode::Full) b.ro_bind_try(l, l);
+    }
+    if (p.libs == LibsMode::Full)
         for (const char* d : {"/usr/lib", "/usr/lib64"})
             if (fs::is_directory(d)) b.ro_bind(d, d);
-        for (const char* l : {"/lib", "/lib64"}) {
-            std::error_code ec;
-            if (fs::is_symlink(l, ec)) { if (fs::exists(l, ec)) b.symlink(fs::read_symlink(l).string(), l); }
-            else if (fs::is_directory(l, ec)) b.ro_bind_try(l, l);
-        }
-    }
 
+    std::vector<std::pair<std::string, fs::path>> bound;   // for `libs = minimal`
     std::set<std::string> seen;
     for (const std::string& tok : p.bins) {
         std::string name = tok;
@@ -120,16 +136,20 @@ void mount_host_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, const 
         try { c.policy->check_bind(real, false); }
         catch (const PolicyError& e) { log::warn(std::string("binary skipped: ") + e.what()); continue; }
         b.ro_bind(real, fs::path("/usr/bin") / name);
+        bound.emplace_back(name, real);
         // Multi-call/alternatives targets sometimes locate resources relative to their real path.
         if (real != *host && !path_under(real, c.user.home) && real != fs::path("/usr/bin") / name)
             b.ro_bind_try(real, real);
     }
 
+    if (p.libs == LibsMode::Minimal)
+        for (const auto& [src, dst] : resolve_minimal_libs(bound, *c.policy).binds) b.ro_bind(src, dst);
+
     if (p.fs_defaults) {
         for (const char* d : {"/etc/ld.so.cache", "/usr/share/terminfo", "/usr/share/zoneinfo", "/etc/ssl",
                               "/etc/ca-certificates", "/etc/os-release", "/usr/lib/os-release"})
             if (fs::exists(d)) b.ro_bind_try(d, d);
-        if (c.network && fs::exists("/etc/resolv.conf")) b.ro_bind("/etc/resolv.conf", "/etc/resolv.conf");
+        if (c.network) bind_resolv_conf(b, c);
     }
 }
 
@@ -157,7 +177,7 @@ void mount_bundle_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, std:
     }
     if (c.network) {
         // resolv.conf from host (or from the ip-netns overlay when running under ivpn).
-        if (fs::exists("/etc/resolv.conf")) b.ro_bind("/etc/resolv.conf", "/etc/resolv.conf");
+        bind_resolv_conf(b, c);
     }
 }
 
@@ -209,6 +229,8 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
     b.flag("--die-with-parent");
     if (p.new_session) b.flag("--new-session");     // blocks TIOCSTI keystroke injection
     b.raw({"--cap-drop", "ALL"});
+    // Inside pasta's user namespace we may be mapped to uid 0; pin the identity the fake passwd describes.
+    if (c.pasta) b.raw({"--uid", uid, "--gid", std::to_string(c.user.gid)});
     if (p.disable_userns && c.userns_disable_supported) b.flag("--disable-userns");
     b.raw({"--hostname", p.hostname});
     b.raw({"--proc", "/proc"}).raw({"--dev", "/dev"});
@@ -328,7 +350,14 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
         cmd = wrapped;
     }
     b.command(cmd);
-    if (!p.seccomp.empty()) plan.seccomp = expand(p.seccomp, vc);
+    if (p.seccomp == "none") {
+        log::warn("seccomp = none: no syscall filter; the sandbox can reach the full kernel syscall surface");
+    } else if (p.seccomp == "default") {
+        plan.seccomp = c.session / "seccomp.bpf";
+        write_default_seccomp(plan.seccomp);
+    } else {
+        plan.seccomp = expand(p.seccomp, vc);
+    }
     return plan;
 }
 

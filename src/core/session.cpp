@@ -7,6 +7,7 @@
 
 #include "core/bundle.hpp"
 #include "core/launch.hpp"
+#include "core/seccomp.hpp"
 #include "net/netns.hpp"
 #include "ui/display.hpp"
 #include "util/log.hpp"
@@ -121,6 +122,9 @@ int run_profile(Profile p, const RunOptions& o) {
     c.cwd = cwd; c.mount_cwd = mount_cwd; c.command_override = o.command;
     c.userns_disable_supported = pr.ver.at_least(0, 8, 0);
     c.network = p.net != NetMode::None;
+    c.pasta = p.net == NetMode::Pasta;
+    fs::path pasta;
+    if (c.pasta && !o.dry) pasta = find_pasta();
 
     std::unique_ptr<NetNs> ns;
     std::unique_ptr<XephyrServer> xs;
@@ -153,9 +157,10 @@ int run_profile(Profile p, const RunOptions& o) {
     if (p.clipboard_out) cb = std::make_unique<ClipboardBridge>(pr.user, sd.path / "clip", p.clipboard_sanitize);
 
     Strings launch = launcher_argv(pr.bwrap, sd.path, plan.b, plan.seccomp);
+    if (c.pasta) launch = pasta_argv(pasta, launch);
     Strings full = ns ? ns->wrap(launch) : as_user(pr.user, launch);
     log::info(cat("starting '", p.name, "' (", p.root == RootMode::Host ? "host-whitelist" : "bundle", " userland, net=",
-                  p.net == NetMode::None ? "none" : p.net == NetMode::Host ? "host" : "ivpn", ")"));
+                  p.net == NetMode::None ? "none" : p.net == NetMode::Host ? "host" : p.net == NetMode::Pasta ? "pasta" : "ivpn", ")"));
     int rc = run_with_signals(full);
     log::info(cat("sandbox exited with code ", rc));
     return rc;    // destructors: clipboard -> Xephyr -> netns (rules, veth, namespace) -> session dir
@@ -198,6 +203,8 @@ int doctor() {
             "kernel/AppArmor blocks them (Ubuntu 24.04: kernel.apparmor_restrict_unprivileged_userns=0 or an AppArmor profile for bwrap)", true);
     }
     row("setpriv", which("setpriv").has_value(), "util-linux", false);
+    row("seccomp filter (built in)", seccomp_available(), "rebuilt without libseccomp: profiles must set `seccomp = none` or a custom .bpf", false);
+    row("pasta", which("pasta").has_value(), "package passt; required for [network] mode=pasta and `bundle setup`", false);
     std::fprintf(stderr, "bundle mode:\n");
     for (auto t : {"curl", "tar", "sha256sum"}) row(t, which(t).has_value(), "required for `bundle setup`", false);
     std::fprintf(stderr, "ivpn mode:\n");

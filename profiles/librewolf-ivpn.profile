@@ -20,6 +20,8 @@ new_session = yes
 allow = librewolf i3 sh
 
 [fs]
+# A browser dlopens graphics/audio/GTK plugins that cannot be derived from ELF headers.
+libs = full
 # Browser runtime data. Missing paths are skipped silently (ro_try).
 ro_try = /usr/lib/librewolf
 ro_try = /usr/share/librewolf

@@ -33,7 +33,7 @@ USAGE
   holdfast doctor                                  check host prerequisites
 
 RUN OPTIONS
-  --net=none|host|ivpn   override [network] mode      --wg=FILE      WireGuard config (ivpn)
+  --net=none|pasta|host|ivpn   override [network] mode      --wg=FILE      WireGuard config (ivpn)
   --cwd=DIR              working tree to mount        --no-cwd       never mount a working tree
   -y, --yes              don't ask before mounting    -n, --dry-run  same as `print`
   -v, --verbose          debug output
@@ -124,7 +124,8 @@ int main(int argc, char** argv) {
             else if (a.rfind("--net=", 0) == 0) {
                 std::string m = a.substr(6);
                 if (m == "none") o.net = NetMode::None; else if (m == "host") o.net = NetMode::Host; else if (m == "ivpn") o.net = NetMode::Ivpn;
-                else throw Error("--net expects none|host|ivpn");
+                else if (m == "pasta") o.net = NetMode::Pasta;
+                else throw Error("--net expects none|pasta|host|ivpn");
             }
             else if (a.rfind("--wg=", 0) == 0) o.wg_conf = a.substr(5);
             else if (a.rfind("--cwd=", 0) == 0) o.cwd = a.substr(6);

@@ -7,7 +7,8 @@
 namespace hf {
 
 enum class RootMode { Host, Bundle };
-enum class NetMode { None, Host, Ivpn };
+enum class NetMode { None, Host, Pasta, Ivpn };
+enum class LibsMode { Minimal, Full };
 enum class DisplayMode { None, Host, Xephyr };
 enum class CwdMode { None, Ask, Yes };
 
@@ -26,7 +27,7 @@ struct Profile {
     std::string hostname = "holdfast";
     bool new_session = true;
     bool disable_userns = true;
-    std::string seccomp;           // optional compiled BPF file
+    std::string seccomp = "default";   // "default" (built-in filter) | "none" | path to a compiled BPF file
     CwdMode cwd = CwdMode::Ask;
     std::string cwd_dest = "/shared";
 
@@ -35,7 +36,7 @@ struct Profile {
 
     // [fs]
     bool fs_defaults = true;
-    bool libs = true;
+    LibsMode libs = LibsMode::Minimal;
     std::vector<MountSpec> mounts;
     Strings tmpfs;
     Strings extra_deny;

@@ -16,6 +16,14 @@ BwrapVersion bwrap_version(const fs::path& bwrap);
 // interpolated into shell text.
 Strings launcher_argv(const fs::path& bwrap, const fs::path& session, const ArgBuilder& b, const fs::path& seccomp);
 
+// pasta (from the passt package) gives the sandbox a *private* network namespace with outbound
+// connectivity. Unlike net=host this does not share the host's abstract unix sockets (X11, D-Bus), and
+// with the options below the sandbox cannot reach host loopback services or forward ports in either direction.
+fs::path find_pasta();                       // throws if missing
+inline constexpr const char* kPastaDns = "192.0.2.53";   // RFC 5737 TEST-NET-1: intercepted by pasta --dns-forward
+std::string pasta_resolv_conf();             // /etc/resolv.conf for the sandbox
+Strings pasta_argv(const fs::path& pasta, const Strings& inner);
+
 // Runs argv in the foreground, forwarding SIGTERM/SIGHUP, returns the exit code.
 int run_with_signals(const Strings& argv);
 

@@ -90,14 +90,15 @@ static void extract(const fs::path& tarball, const Paths& paths) {
     fs::rename(tmp, paths.rootfs);
 }
 
-static ArgBuilder writable_args(const Profile& p, const User& u, const Paths& paths, bool root_uid) {
+static ArgBuilder writable_args(const Profile& p, const User& u, const Paths& paths, const fs::path& session, bool root_uid) {
     ArgBuilder b;
     b.flag("--unshare-all").flag("--unshare-user").flag("--share-net").flag("--die-with-parent");
     if (root_uid) b.raw({"--uid", "0", "--gid", "0"});   // apk needs to chown as "root" (userns-mapped to you)
     b.raw({"--hostname", "holdfast-provision"});
     b.bind(paths.rootfs, "/");
     b.raw({"--proc", "/proc"}).raw({"--dev", "/dev"}).tmpfs("/tmp");
-    if (fs::exists("/etc/resolv.conf")) b.ro_bind("/etc/resolv.conf", "/etc/resolv.conf");
+    write_file(session / "resolv.conf", pasta_resolv_conf(), 0644);   // runs inside pasta; see launch.hpp
+    b.ro_bind(session / "resolv.conf", "/etc/resolv.conf");
     make_private_dir(paths.home);
     const fs::path fh = fs::path("/home") / p.fake_user;
     b.bind(paths.home, fh);
@@ -129,10 +130,10 @@ void bundle_setup(const Profile& p, const User& u, const Paths& paths, const fs:
     }
     for (auto& l : p.provision) script += l + "\n";
 
-    log::warn("provisioning runs WITH network inside the bundle (as userns-root); only your profile's lines execute");
-    ArgBuilder b = writable_args(p, u, paths, true);
+    log::warn("provisioning runs WITH network (via pasta, a private namespace) inside the bundle (as userns-root); only your profile's lines execute");
+    ArgBuilder b = writable_args(p, u, paths, session, true);
     b.command({"/bin/sh", "-c", script});
-    auto la = launcher_argv(find_bwrap(), session, b, "");
+    auto la = pasta_argv(find_pasta(), launcher_argv(find_bwrap(), session, b, ""));
     int rc = run_with_signals(as_user(u, la));
     if (rc != 0) throw Error(cat("provisioning failed (exit ", rc, "); fix the profile and re-run `bundle setup`"));
     write_file(paths.state / "provision.stamp", provision_stamp(p) + "\n", 0600);
@@ -141,9 +142,9 @@ void bundle_setup(const Profile& p, const User& u, const Paths& paths, const fs:
 
 int bundle_shell(const Profile& p, const User& u, const Paths& paths, const fs::path& session) {
     if (!bundle_installed(paths)) throw Error("bundle not installed; run: holdfast bundle setup " + p.name);
-    ArgBuilder b = writable_args(p, u, paths, true);
+    ArgBuilder b = writable_args(p, u, paths, session, true);
     b.command({"/bin/sh"});
-    return run_with_signals(as_user(u, launcher_argv(find_bwrap(), session, b, "")));
+    return run_with_signals(as_user(u, pasta_argv(find_pasta(), launcher_argv(find_bwrap(), session, b, ""))));
 }
 
 void bundle_purge(const Paths& paths, bool everything) {
