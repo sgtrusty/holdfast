@@ -252,7 +252,7 @@ int main() {
         User u = fake_user(); u.home = d + "/home"; fs::create_directories(u.home);
         u.runtime_dir = d + "/run";
         Policy pol(u, {});
-        Profile p = parse_profile("[profile]\nname=t\ncommand=sh\n[bin]\nallow = sh\n[home]\nuser=box\n", "t");
+        Profile p = parse_profile("[profile]\nname=t\ncommand=sh\n[bin]\nallow = sh\n[fs]\nlibs=full\n[home]\nuser=box\n", "t");
         PlanCtx c; c.user = u; c.paths = make_paths(u, "t"); c.paths.data = d + "/data"; c.paths.home = d + "/data/home";
         c.policy = &pol; c.session = d + "/sess"; fs::create_directories(c.session);
         Plan pl = build_plan(p, c);
@@ -275,14 +275,17 @@ int main() {
         CHECK(has_seq(pl2.b.args(), {"--share-net"}));
         CHECK(has_seq(pl2.b.args(), {"--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"}));
         CHECK(!has_seq(pl2.b.args(), {"--uid"}));
-        // libs = minimal (default): no whole library directories, but the loader's libc is there
-        CHECK(!has_seq(a, {"--ro-bind", "/usr/lib", "/usr/lib"}));
-        if (auto e = read_elf_deps(fs::canonical(*which("sh"))); e && !e->needed.empty()) {
-            bool libc = false;
-            for (size_t i = 0; i + 2 < a.size(); ++i)
-                if (a[i] == "--ro-bind" && fs::path(a[i + 2]).filename().string().rfind("libc.", 0) == 0) libc = true;
-            CHECK(libc);
-        }
+        CHECK(has_seq(a, {"--ro-bind", "/usr/lib", "/usr/lib"}));    // libs = full above binds the directories
+        // libs = minimal: exactly the [libs] list, and an empty list with binaries is an error
+        std::string lib = d + "/libfoo.so.1";
+        write_file(lib, "x", 0644);
+        Profile m = parse_profile("[profile]\nname=t\ncommand=sh\n[bin]\nallow = sh\n[libs]\nbind = " + lib + "\n[home]\nuser=box\n", "t");
+        Plan pm = build_plan(m, c);
+        CHECK(has_seq(pm.b.args(), {"--ro-bind", fs::canonical(lib).string(), lib}));
+        CHECK(!has_seq(pm.b.args(), {"--ro-bind", "/usr/lib", "/usr/lib"}));
+        Profile e = parse_profile("[profile]\nname=t\ncommand=sh\n[bin]\nallow = sh\n[home]\nuser=box\n", "t");
+        THROWS(ProfileError, build_plan(e, c));
+        THROWS(ProfileError, parse_profile("[libs]\nbind = relative/path\n", "t"));
 #ifdef HOLDFAST_HAVE_SECCOMP
         CHECK(pl.seccomp == c.session / "seccomp.bpf" && fs::exists(pl.seccomp));
 #endif

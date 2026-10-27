@@ -11,7 +11,7 @@ description = lazygit test build in a private Alpine bundle
 mode        = bundle
 command     = lazygit
 cwd         = ask
-new_session = no              # lazygit is a full-screen TUI that wants a controlling tty
+new_session = no
 
 [bundle]
 alpine_version = latest-stable
@@ -31,4 +31,4 @@ user = sandbox
 mode = none                   # provisioning has network; day-to-day running does not
 
 [git]
-protect = no                  # lazygit has to write .git (stage/commit); you opted into that
+protect = yes                 # lazygit has to write .git (stage/commit); you opted into that

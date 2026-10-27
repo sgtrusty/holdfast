@@ -111,6 +111,11 @@ Profile parse_profile(const std::string& text, const std::string& o) {
                 else bad(l, o, "expected minimal|full (the old yes|no is gone)");
             }
             else bad(l, o, "unknown key");
+        } else if (s == "libs") {
+            if (k == "bind") {
+                if (!fs::path(v).is_absolute()) bad(l, o, "expected an absolute path");
+                p.lib_binds.push_back(v);
+            } else bad(l, o, "unknown key");
         } else if (s == "home") {
             if (k == "user") p.fake_user = v;
             else if (k == "dirs") append_words(p.home_dirs, v);

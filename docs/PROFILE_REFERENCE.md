@@ -30,7 +30,14 @@ Mount syntax: `SRC` or `SRC => DEST` (DEST defaults to SRC). Globs (`* ? [..]`) 
 | tmpfs | extra tmpfs mount |
 | deny | extra deny-list path (globs ok) |
 | defaults | `yes`: bind ld.so.cache, terminfo, zoneinfo, ssl, ca-certificates, os-release (+resolv.conf if networked) |
-| libs | `minimal` (default): bind only the shared libraries the allowed binaries need (ELF `DT_NEEDED`, resolved transitively, nothing executed) plus a built-in map of runtime data dirs (python stdlib, `git-core`, nvim runtime, NSS modules). Unresolvable libs or toolchain commands (`gcc cc g++ ld lld clang rustc cargo`) are an error that tells you to use `full`; there is no automatic fallback. `full`: bind `/usr/lib /usr/lib64` (and `/lib*`) read-only. Anything `dlopen`ed that is not in the map needs an `[fs] ro_try` entry, or `libs = full`. |
+| libs | `minimal` (default): bind exactly the files listed in `[libs]` (below); nothing is analysed at run time. An empty `[libs]` with a non-empty `[bin]` is an error. `full`: bind `/usr/lib /usr/lib64` (and `/lib*`) read-only. |
+
+## [libs]  (host mode, `libs = minimal`)
+`bind = /absolute/path` (repeatable) – read-only, bound at that path. A missing entry is an error (stale list: regenerate or use `libs = full`).
+Generate the list once with `holdfast libs PROFILE` (reads ELF `DT_NEEDED` headers of your `[bin] allow` binaries plus a built-in map of
+runtime data dirs such as the python stdlib or `git-core`; executes nothing), review it and paste it into the profile.
+Toolchain commands (`gcc cc g++ ld lld clang rustc cargo`) are refused by the generator: use `libs = full`.
+Entries are host-specific (distro, arch, versions). `holdfast libs --check PROFILE` re-runs the analysis and prints a diff (`+` missing from the profile, `-` no longer produced); exit 1 if they differ, handy for CI.
 
 ## [home]
 `user` (fake login name, default `sandbox`) · `dirs` (create in fake home) · `bind = REL [=> REL]` (rw, from real `$HOME`) · `ro_bind` (same, read-only).

@@ -24,6 +24,7 @@ USAGE
   holdfast run [options] PROFILE [-- COMMAND...]   run a sandbox
   holdfast print [options] PROFILE                 show the exact bwrap argv (no side effects)
   holdfast check PROFILE                           validate a profile
+  holdfast libs [--check] PROFILE                  print a [libs] block for `libs = minimal` (reads ELF headers; authoring only)
   holdfast bundle setup|shell|info|purge PROFILE   manage the Alpine bundle   [--force]
   holdfast net-test PROFILE                        bring up the netns and test the kill switch
   holdfast net-cleanup NAME                        remove a stale namespace (e.g. hf-librewolf)
@@ -110,7 +111,7 @@ int main(int argc, char** argv) {
         // generic option scan (stops at `--`)
         RunOptions o;
         std::string sub;
-        bool force = false, yes = false;
+        bool force = false, yes = false, check_libs = false;
         Strings pos;
         size_t i = 0;
         for (; i < args.size(); ++i) {
@@ -121,6 +122,7 @@ int main(int argc, char** argv) {
             else if (a == "-n" || a == "--dry-run") o.dry = true;
             else if (a == "--no-cwd") o.no_cwd = true;
             else if (a == "--force") force = true;
+            else if (a == "--check") check_libs = true;
             else if (a.rfind("--net=", 0) == 0) {
                 std::string m = a.substr(6);
                 if (m == "none") o.net = NetMode::None; else if (m == "host") o.net = NetMode::Host; else if (m == "ivpn") o.net = NetMode::Ivpn;
@@ -178,6 +180,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "profile '%s' OK\n", p.name.c_str());
             return 0;
         }
+        if (cmd == "libs") return print_libs(p, check_libs);
         if (cmd == "net-test") return net_test(p, o);
         if (cmd == "purge") {
             User u = resolve_user();

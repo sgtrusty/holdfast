@@ -38,6 +38,7 @@ struct Profile {
     bool fs_defaults = true;
     LibsMode libs = LibsMode::Minimal;
     std::vector<MountSpec> mounts;
+    Strings lib_binds;             // [libs] bind: explicit list used by `libs = minimal` (see `holdfast libs`)
     Strings tmpfs;
     Strings extra_deny;
 

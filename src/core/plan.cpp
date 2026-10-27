@@ -4,7 +4,6 @@
 #include <set>
 
 #include "core/launch.hpp"
-#include "core/libs.hpp"
 #include "core/seccomp.hpp"
 #include "util/log.hpp"
 #include "util/sys.hpp"
@@ -100,6 +99,27 @@ void bind_resolv_conf(ArgBuilder& b, const PlanCtx& c) {
     }
 }
 
+// `libs = minimal`: bind exactly the profile's [libs] list. Nothing is analysed at run time; the list is
+// produced once by `holdfast libs PROFILE` and reviewed/committed like the rest of the profile.
+void mount_listed_libs(ArgBuilder& b, const Profile& p, const PlanCtx& c) {
+    if (p.lib_binds.empty()) {
+        if (!p.bins.empty())
+            throw ProfileError(cat("libs = minimal needs a [libs] list: generate one with `holdfast libs ", p.name,
+                                   "` and paste it into the profile, or set `libs = full` in [fs]"));
+        return;
+    }
+    Strings sorted = p.lib_binds;
+    std::sort(sorted.begin(), sorted.end());                  // parents before children
+    for (const std::string& l : sorted) {
+        std::error_code ec;
+        if (!fs::exists(l, ec))
+            throw Error(cat("[libs] entry does not exist on this host: ", l, " (profile written for another system? re-run `holdfast libs ",
+                            p.name, "`, or set `libs = full`)"));
+        c.policy->check_bind(l, false);
+        b.ro_bind(canon(l), l);
+    }
+}
+
 void mount_host_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, const VarCtx& vc) {
     b.dir("/usr/bin");
     b.symlink("usr/bin", "/bin").symlink("usr/bin", "/sbin").symlink("usr/bin", "/usr/sbin");
@@ -115,7 +135,6 @@ void mount_host_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, const 
         for (const char* d : {"/usr/lib", "/usr/lib64"})
             if (fs::is_directory(d)) b.ro_bind(d, d);
 
-    std::vector<std::pair<std::string, fs::path>> bound;   // for `libs = minimal`
     std::set<std::string> seen;
     for (const std::string& tok : p.bins) {
         std::string name = tok;
@@ -136,14 +155,12 @@ void mount_host_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, const 
         try { c.policy->check_bind(real, false); }
         catch (const PolicyError& e) { log::warn(std::string("binary skipped: ") + e.what()); continue; }
         b.ro_bind(real, fs::path("/usr/bin") / name);
-        bound.emplace_back(name, real);
         // Multi-call/alternatives targets sometimes locate resources relative to their real path.
         if (real != *host && !path_under(real, c.user.home) && real != fs::path("/usr/bin") / name)
             b.ro_bind_try(real, real);
     }
 
-    if (p.libs == LibsMode::Minimal)
-        for (const auto& [src, dst] : resolve_minimal_libs(bound, *c.policy).binds) b.ro_bind(src, dst);
+    if (p.libs == LibsMode::Minimal) mount_listed_libs(b, p, c);
 
     if (p.fs_defaults) {
         for (const char* d : {"/etc/ld.so.cache", "/usr/share/terminfo", "/usr/share/zoneinfo", "/etc/ssl",
