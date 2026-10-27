@@ -1,7 +1,10 @@
 // holdfast - sandbox launcher built on bubblewrap
+#include <unistd.h>
+
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "core/bundle.hpp"
 #include "core/datadefs.hpp"
@@ -18,41 +21,71 @@
 
 using namespace hf;
 
-static void usage() {
-    std::fputs(
-R"(holdfast - bubblewrap sandbox launcher: whitelist userland, optional WireGuard netns, nested X
+namespace {
 
-USAGE
-  holdfast run [options] PROFILE [-- COMMAND...]   run a sandbox
-  holdfast print [options] PROFILE                 show the exact bwrap argv (no side effects)
-  holdfast check PROFILE                           validate a profile
-  holdfast libs [--check|--refresh] [OS]             generate/verify data/os/OS.profile: the resolved library files per OS for every data/lib
-                                                   (reads ELF headers of this host; authoring/CI only, never part of `run`)
-  holdfast bundle setup|shell|info|purge PROFILE   manage the Alpine bundle   [--refresh]
-  holdfast net-test PROFILE                        bring up the netns and test the kill switch
-  holdfast net-cleanup NAME                        remove a stale namespace (e.g. hf-librewolf)
-  holdfast purge PROFILE [-y]                      delete ALL state of a profile (incl. fake $HOME)
-  holdfast init [NAME]                             list/print example profiles
-  holdfast list [libs|os]                          list known profiles (or data/lib, data/os definitions)
-  holdfast doctor                                  check host prerequisites
+// Classic SGR only (bold, cyan, reset), and only when the stream is a terminal that wants colour.
+struct Ansi { const char *b = "", *c = "", *r = ""; };
+Ansi ansi_for(FILE* f) {
+    const char* term = std::getenv("TERM");
+    if (!isatty(fileno(f)) || std::getenv("NO_COLOR") || (term && std::strcmp(term, "dumb") == 0)) return {};
+    return {"\033[1m", "\033[36m", "\033[0m"};
+}
 
-RUN OPTIONS
-  --net=none|pasta|host|ivpn   override [network] mode      --wg=FILE      WireGuard config (ivpn)
-  --cwd=DIR              working tree to mount        --no-cwd       never mount a working tree
-  -y, --yes              don't ask before mounting    -n, --dry-run  same as `print`
-  -v, --verbose          debug output
+}  // namespace
 
-PROFILE is a name (searched in $HOLDFAST_PROFILES, ~/.config/holdfast/profiles, /etc/holdfast/profiles, then
-<data>/profile for each data dir) or a path to a .profile file. Data dirs ($HOLDFAST_DATA, ~/.config/holdfast/data,
-/etc/holdfast/data, <share>/data) hold lib/ (what a tool needs), os/ (OS setups and per-OS locks) and profile/.
-)", stderr);
+// Explicit `help` goes to stdout (pipe it into a pager); a bare `holdfast` goes to stderr with exit code 2.
+static void usage(FILE* f) {
+    const Ansi a = ansi_for(f);
+    auto head = [&](const char* t) { std::fprintf(f, "\n%s%s%s\n", a.b, t, a.r); };
+    // %-*s pads the visible text only: the escape codes are separate arguments outside the padded field.
+    auto row = [&](const char* name, const char* desc) { std::fprintf(f, "  %s%-34s%s %s\n", a.c, name, a.r, desc); };
+
+    std::fprintf(f, "%sholdfast%s %s: declarative bubblewrap sandboxes\n", a.b, a.r, HOLDFAST_VERSION);
+    head("USAGE");
+    std::fprintf(f, "  holdfast %s<command>%s [options] [PROFILE] [-- CMD...]\n", a.c, a.r);
+
+    head("RUN");
+    row("run PROFILE [-- CMD...]", "run a sandbox (CMD overrides the profile)");
+    row("print PROFILE", "show the exact bwrap argv, change nothing");
+    row("check PROFILE", "validate a profile");
+
+    head("PROFILES AND DATA");
+    row("list [libs|os]", "list profiles, or lib/os definitions");
+    row("init [NAME]", "list or print the example profiles");
+    row("libs [OS]", "scan this host, print its library file list");
+
+    head("BUNDLES");
+    row("bundle setup PROFILE", "fetch, verify and provision the userland");
+    row("bundle shell|info|purge PROFILE", "root shell / status / remove the userland");
+    row("purge PROFILE", "delete all state, incl. the fake $HOME");
+
+    head("NETWORK (ivpn)");
+    row("net-test PROFILE", "test the kill switch");
+    row("net-cleanup NAME", "remove a stale namespace");
+
+    head("OTHER");
+    row("doctor", "check host prerequisites");
+    row("help, version", "this text / the version");
+
+    head("OPTIONS");
+    row("-y, --yes", "don't ask before mounting the working tree");
+    row("--cwd=DIR, --no-cwd", "mount DIR / mount no working tree");
+    row("--net=none|pasta|host|ivpn", "override the profile's network mode");
+    row("--wg=FILE", "WireGuard config (ivpn)");
+    row("-n, --dry-run", "same as print");
+    row("--refresh", "rebuild a bundle / rewrite the libs list");
+    row("--check", "libs: exit 1 if the saved list is stale");
+    row("-v, --verbose", "debug output");
+
+    std::fprintf(f, "\n%sPROFILE%s is a name (profile and data dirs are searched) or a path to a .profile file.\n"
+                    "Docs: README.md and docs/. Colour: off when not a terminal, NO_COLOR is set, or TERM=dumb.\n", a.b, a.r);
 }
 
 static Profile load(const std::string& name) {
     std::string home;
     try { home = resolve_user().home.string(); } catch (...) { if (const char* h = std::getenv("HOME")) home = h; }
     Profile p = load_profile_file(find_profile(name, home));
-    resolve_profile_data(p, data_roots(home));       // os file / lib locks the profile refers to (fails closed)
+    resolve_profile_data(p, data_roots(home));       // os file / library file lists the profile refers to (fails closed)
     return p;
 }
 
@@ -124,7 +157,8 @@ static int cmd_list(const Strings& a) {
 int main(int argc, char** argv) {
     std::signal(SIGPIPE, SIG_IGN);
     Strings args(argv + 1, argv + argc);
-    if (args.empty() || args[0] == "-h" || args[0] == "--help" || args[0] == "help") { usage(); return args.empty() ? 2 : 0; }
+    if (args.empty()) { usage(stderr); return 2; }
+    if (args[0] == "-h" || args[0] == "--help" || args[0] == "help") { usage(stdout); return 0; }
     if (args[0] == "--version" || args[0] == "version") { std::printf("holdfast %s\n", HOLDFAST_VERSION); return 0; }
 
     const std::string cmd = args[0];
