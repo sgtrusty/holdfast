@@ -1,5 +1,5 @@
 # Self-contained Alpine userland (NOT your host's /usr, /etc, /bin) with Go + Rust,
-# used to build and run the lazygit "stage hunks" test build.
+# used to build and run lazygit from upstream master (the feature-branch recipes stay in data/dep/ as comments).
 # Replaces: develbox.sh
 #
 #   cd ~/some/repo && holdfast run lazygit-dev    # first run downloads + verifies Alpine and installs the tools (in sandboxes)
@@ -7,7 +7,7 @@
 
 [profile]
 name        = lazygit-dev
-description = lazygit test build in a private Alpine bundle
+description = lazygit (upstream master) in a private Alpine bundle
 mode        = bundle
 # The userland (Alpine release, pinned hash, package list) is declared once in data/os/alpine-3.24-dev.profile and
 # shared by every profile that names it; holdfast refuses to run a bundle built from a different version of that file.
