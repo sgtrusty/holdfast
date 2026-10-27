@@ -203,7 +203,7 @@ int main() {
     test("profile: pasta, libs, seccomp keys", [] {
         Profile d = parse_profile("[profile]\nname=t\ncommand=sh\n", "t");
         CHECK(d.libs == LibsMode::Minimal && d.seccomp == "default" && d.net == NetMode::None);
-        Profile p = parse_profile("[profile]\nname=t\ncommand=sh\nseccomp=none\n[fs]\nlibs=full\n[network]\nmode=pasta\n", "t");
+        Profile p = parse_profile("[profile]\nname=t\ncommand=sh\nseccomp=none\n[fs]\nlibs=full\n[network]\nmode=pasta\ndns=1.1.1.1\n", "t");
         CHECK(p.libs == LibsMode::Full && p.seccomp == "none" && p.net == NetMode::Pasta);
         THROWS(ProfileError, parse_profile("[profile]\nname=t\ncommand=sh\n[fs]\nlibs=yes\n", "t"));
         CHECK(d.terminal == TermMode::Filter);
@@ -333,7 +333,7 @@ int main() {
                        "[files." + host_arch() + ".shell]\nbind = /usr/lib/libc.so.6\nbind = /usr/lib/libtinfo.so.6\n", 0644);
             write_file(d + "/os/alpine-x.profile",
                        "[os]\nkind = bundle\nalpine_version = 3.24.3\nalpine_sha256 = " + std::string(64, 'a') + "\npackages = git curl\n", 0644);
-            write_file(d + "/os/alpine-y.profile", "[os]\nkind = bundle\nalpine_version = 3.23.0\npackages = git curl\n", 0644);
+            write_file(d + "/os/alpine-y.profile", "[os]\nkind = bundle\nalpine_version = 3.23.0\npackages = git curl\n[install]\ndns = 9.9.9.9\n", 0644);
             fs::create_directories(d + "/dep");
             write_file(d + "/dep/hello.profile", "[dep]\ndescription = says hello\nos = alpine-x\nneeds = sh\n[install]\nrun = echo hello > \"$HOME/hello\"\n", 0644);
             write_file(d + "/dep/wrongos.profile", "[dep]\nos = alpine-y\n[install]\nrun = true\n", 0644);
@@ -378,6 +378,38 @@ int main() {
         THROWS(ProfileError, parse_os("[os]\nkind = bundle\n", "t", "x"));                                         // version is required
         THROWS(ProfileError, parse_os("[os]\nkind = bundle\nalpine_version = 3.24.3\nalpine_mirror = http://x\n", "t", "x"));   // https only
         CHECK(parse_os("[os]\nkind = bundle\nalpine_version = 3.24.3\n", "t", "x").alpine_version == "3.24.3");
+        {   // [install]: how the fetch/apk sandboxes reach the network
+            const std::string ob = "[os]\nkind = bundle\nalpine_version = 3.24.3\n";
+            const std::string pin = "alpine_sha256 = " + std::string(64, 'a') + "\n";
+            OsDef d0 = parse_os(ob, "t", "x");
+            CHECK(d0.install_net == NetMode::Pasta && d0.install_dns.empty());
+            OsDef d1 = parse_os(ob + "[install]\nnet = pasta\ndns = 9.9.9.9\nuse = shell archive\nuse = net\n", "t", "x");
+            CHECK(d1.install_net == NetMode::Pasta && d1.install_dns == "9.9.9.9" && (d1.install_use == Strings{"shell", "archive", "net"}));
+            THROWS(ProfileError, parse_os(ob + "[install]\nuse = ../x\n", "t", "x"));
+            CHECK(parse_os(ob + pin + "[install]\nnet = none\n", "t", "x").install_net == NetMode::None);
+            THROWS(ProfileError, parse_os(ob + "[install]\nnet = host\n", "t", "x"));                    // never the host namespace
+            THROWS(ProfileError, parse_os(ob + "[install]\nnet = ivpn\n", "t", "x"));
+            THROWS(ProfileError, parse_os(ob + "[install]\nbogus = 1\n", "t", "x"));
+            THROWS(ProfileError, parse_os(ob + "[install]\ndns = 1.1.1.1 8.8.8.8\n", "t", "x"));
+            THROWS(ProfileError, parse_os(ob + "[install]\ndns = ::1\n", "t", "x"));                     // pasta forwards an IPv4 address
+            THROWS(ProfileError, parse_os(ob + "[install]\nnet = none\n", "t", "x"));                    // offline needs a pinned tarball
+            THROWS(ProfileError, parse_os(ob + pin + "packages = git\n[install]\nnet = none\n", "t", "x"));   // apk needs the network
+            THROWS(ProfileError, parse_os(ob + pin + "[install]\nnet = none\ndns = 1.1.1.1\n", "t", "x"));
+            THROWS(ProfileError, parse_os("[os]\nkind = host\nid = a\n[install]\nnet = pasta\n", "t", "x"));   // bundle only
+        }
+        CHECK(parse_profile("[network]\ndns = 1.1.1.1\nmode = pasta\n", "t").dns == "1.1.1.1");          // key order does not matter
+        THROWS(ProfileError, parse_profile("[network]\nmode = pasta\n", "t"));                           // no fallback to the host resolv.conf
+        THROWS(ProfileError, parse_profile("[profile]\nallow_host_libs = yes\n", "t"));                  // replaced by the os file's [install] use
+        CHECK(parse_profile("[network]\nmode = host\ndns = 1.1.1.1\n", "t").dns == "1.1.1.1");
+        CHECK(parse_profile("[network]\nmode = host\ndns = HOST\n", "t").dns == "host");                 // opt-in to the host's resolv.conf
+        THROWS(ProfileError, parse_profile("[network]\nmode = host\n", "t"));                           // never by default
+        THROWS(ProfileError, parse_profile("[network]\nmode = pasta\ndns = host\n", "t"));             // pasta forwards to an address
+        THROWS(ProfileError, parse_profile("[network]\nmode = ivpn\ndns = 1.1.1.1\n", "t"));           // the tunnel's DNS comes from wg
+        THROWS(ProfileError, parse_profile("[network]\ndns = 1.1.1.1\n", "t"));                           // default mode is none
+        THROWS(ProfileError, parse_profile("[network]\nmode = pasta\ndns = resolver.lan\n", "t"));
+        CHECK(is_ipv4_unicast("1.1.1.1") && is_ipv4_unicast("127.0.0.53") && is_ipv4_unicast("192.168.1.1"));
+        CHECK(!is_ipv4_unicast("") && !is_ipv4_unicast("0.0.0.0") && !is_ipv4_unicast("224.0.0.1") && !is_ipv4_unicast("255.255.255.255"));
+        CHECK(!is_ipv4_unicast("1.1") && !is_ipv4_unicast(" 1.1.1.1") && !is_ipv4_unicast("1.1.1.1 ") && !is_ipv4_unicast("::1"));
         THROWS(ProfileError, parse_profile("[profile]\nos = ../x\n", "t"));                // names become file names
         CHECK((parse_profile("[libs]\nuse = python3 git\nuse = nvim\n", "t").lib_use == Strings{"python3", "git", "nvim"}));
         OsDef o = parse_os("[os]\nkind = host\nid = Debian\nversion = 12\n[files.x86_64.py.thon]\nbind = /a\nbind = /b\n", "t", "debian-12");
@@ -387,11 +419,35 @@ int main() {
         CHECK(valid_data_name("python3") && !valid_data_name("../x") && !valid_data_name("A") && !valid_data_name(""));
     });
 
+    test("data files: profiles are found in the data roots only", [] {
+        DataRoot r;
+        char tmpl[] = "/tmp/hf-home-XXXXXX";
+        const std::string home = mkdtemp(tmpl);
+        fs::create_directories(r.d + "/profile");
+        write_file(r.d + "/profile/lazygit-dev.profile", "[profile]\ncommand=sh\n", 0644);
+        setenv("HOLDFAST_DATA", r.d.c_str(), 1);
+        CHECK(find_profile("lazygit-dev", home) == fs::path(r.d + "/profile/lazygit-dev.profile"));
+        try { find_profile("lazygit", home); CHECK(false); }
+        catch (const Error& e) { CHECK(std::string(e.what()).find("did you mean: lazygit-dev?") != std::string::npos); }
+        fs::create_directories(home + "/.config/holdfast/profiles");                      // the old folder: an error, never ignored
+        write_file(home + "/.config/holdfast/profiles/old.profile", "[profile]\ncommand=sh\n", 0644);
+        try { find_profile("old", home); CHECK(false); }
+        catch (const Error& e) { CHECK(std::string(e.what()).find("move it there") != std::string::npos); }
+        Strings roots = data_roots(home);                                                   // exactly one shipped root
+        CHECK(!roots.empty() && roots[0] == r.d);                                          // $HOLDFAST_DATA first
+        CHECK(std::count_if(roots.begin(), roots.end(), [](const std::string& x) {
+                  return x != "/etc/holdfast/data" && x.find("/.config/holdfast/data") == std::string::npos && x.find("/hf-data-") == std::string::npos; }) == 1);
+        unsetenv("HOLDFAST_DATA");
+        fs::remove_all(home);
+    });
+
     test("data files: host detection and OS matching", [] {
         DataRoot r;
         write_file(r.d + "/os-release", "NAME=\"Fake OS\"\nID=fakeos\nVERSION_ID=\"1.2\"\n", 0644);
         HostId h = read_host_id(r.d + "/os-release");
         CHECK(h.id == "fakeos" && h.version == "1.2" && suggest_os_name(h) == "fakeos-1.2");
+        fs::create_symlink("os-release", r.d + "/os-release-link");                       // Arch/Fedora: /etc/os-release -> ../usr/lib/os-release
+        CHECK(read_host_id(r.d + "/os-release-link").id == "fakeos");
         auto m = match_host_os({r.d}, h);                                                  // os version "1" matches host "1.2"
         CHECK(m.has_value() && m->name == "fakeos-1");
         CHECK(!match_host_os({r.d}, HostId{"otheros", "1"}).has_value());
@@ -404,6 +460,11 @@ int main() {
         Profile y = parse_profile("[profile]\nname=three\nmode=bundle\ncommand=sh\nos=alpine-y\n", "t");
         for (Profile* x : {&p, &q, &y}) resolve_profile_data(*x, {r.d});
         CHECK(p.alpine_version == "3.24.3" && p.alpine_sha256 == std::string(64, 'a') && p.apk_packages == (Strings{"git", "curl"}) && p.bundle_id == "alpine-x");
+        CHECK(p.install_net == NetMode::Pasta && p.install_dns.empty() && y.install_dns == "9.9.9.9");
+        Profile pd = parse_profile(a + "[network]\nmode = pasta\ndns = 1.1.1.1\n", "t");
+        resolve_profile_data(pd, {r.d});
+        CHECK(pd.install_dns.empty());                                                      // install steps use only the os file's resolver
+        CHECK(bundle_spec(pd) == bundle_spec(p));                                           // how the userland is fetched is not what it is
         User u = fake_user();
         Paths pa = make_paths(u, p.name, p.bundle_id), pb = make_paths(u, q.name, q.bundle_id);
         CHECK(pa.rootfs == pb.rootfs && pa.home != pb.home);                               // userland shared, $HOME never
@@ -423,7 +484,9 @@ int main() {
             busy.clipboard_out = true; busy.seccomp = "none"; busy.terminal = TermMode::Passthrough; busy.dep_use = {"hello"};
             DepRecipe pasta = q.deps[0];
             pasta.net = NetMode::Pasta;
+            busy.install_dns = "9.9.9.9";
             Profile dp = dep_profile(busy, pasta);
+            CHECK(dp.dns == "9.9.9.9" && dep_profile(busy, q.deps[0]).dns.empty());           // pasta deps use the os file's [install] dns
             CHECK(dp.net == NetMode::Pasta && dp.cwd == CwdMode::None && !dp.display && dp.display_use.empty() && !dp.allow_host_display);
             CHECK(!dp.audio && !dp.clipboard_out && dp.dep_use.empty() && dp.deps.empty());
             CHECK(dp.seccomp == "none" && dp.terminal == TermMode::Passthrough);              // inherited from the profile, not forced
@@ -435,6 +498,12 @@ int main() {
         THROWS(ProfileError, resolve_profile_data(nodep, {r.d}));                          // unknown dep: fail closed
         THROWS(Error, make_paths(u, "x", "../escape"));
         THROWS(Error, bundle_ensure(p, u, pa, false, true));                               // print/check never download: nothing set up yet
+        THROWS(ProfileError, bundle_ensure(p, u, pa, false, false));                       // alpine-x has no [install] dns: refused, no resolv.conf fallback
+        CHECK(!fs::exists(pa.state));
+        Profile nouse = p;
+        nouse.install_dns = "1.1.1.1";
+        THROWS(ProfileError, bundle_ensure(nouse, u, pa, false, false));                   // no [install] use: nothing from the host is mounted
+        CHECK(!fs::exists(pa.state));
         THROWS(ProfileError, parse_profile("[bundle]\nalpine_version = 3.24.3\n", "t"));   // moved to data/os
         THROWS(ProfileError, parse_profile("[bundle]\npackages = git\n", "t"));
         Profile no_os = parse_profile("[profile]\nname=n\nmode=bundle\ncommand=sh\n", "t");
@@ -488,6 +557,10 @@ int main() {
         CHECK(c.run.net == NetMode::Pasta && c.run.cwd == fs::path("/proj"));
         CHECK((c.pos == Strings{"prof"}));
         CHECK((c.run.command == Strings{"sh", "-c", "echo --net=host -y"}));        // after `--` nothing is interpreted
+        CHECK(parse_args("run", {"--dns=1.1.1.1", "p"}).run.dns == std::string("1.1.1.1"));
+        CHECK(parse_args("run", {"--dns=Host", "p"}).run.dns == std::string("host"));
+        THROWS(Error, parse_args("run", {"--dns=resolver.lan", "p"}));
+        THROWS(Error, parse_args("run", {"--dns=", "p"}));
         Cli b = parse_args("run", {"p", "--refresh", "-v"});
         CHECK(b.refresh && b.run.refresh && b.verbose && (b.pos == Strings{"p"}) && b.run.command.empty());
         CHECK(parse_args("libs", {"--check", "debian-12"}).check);
@@ -759,12 +832,22 @@ int main() {
         CHECK((pl.b.cmd() == Strings{"sh"}));
         for (size_t i = 0; i + 2 < a.size(); ++i)                   // host /etc/passwd must never be bound
             if (a[i] == "--ro-bind" || a[i] == "--bind") CHECK(a[i + 1] != "/etc/passwd");
-        // network on => share-net + resolv.conf; ivpn goes through the same path
+        // network on => share-net; the host's resolv.conf only with dns = host (or the ivpn netns overlay)
         c.network = true;
+        p.net = NetMode::Host;
+        p.dns = "9.9.9.9";
         Plan pl2 = build_plan(p, c);
         CHECK(has_seq(pl2.b.args(), {"--share-net"}));
-        CHECK(has_seq(pl2.b.args(), {"--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"}));
+        CHECK(has_seq(pl2.b.args(), {"--ro-bind", c.session.string() + "/resolv.conf", "/etc/resolv.conf"}));
+        CHECK(read_file(c.session / "resolv.conf") == "nameserver 9.9.9.9\n");
+        CHECK(!has_seq(pl2.b.args(), {"--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"}));
         CHECK(!has_seq(pl2.b.args(), {"--uid"}));
+        p.dns = "host";                                               // explicit opt-in
+        CHECK(!fs::exists("/etc/resolv.conf") || has_seq(build_plan(p, c).b.args(), {"--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"}));
+        p.net = NetMode::Ivpn;
+        p.dns.clear();
+        CHECK(!fs::exists("/etc/resolv.conf") || has_seq(build_plan(p, c).b.args(), {"--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"}));
+        p.net = NetMode::None;
         CHECK(has_seq(a, {"--ro-bind", "/usr/lib", "/usr/lib"}));    // libs = full above binds the directories
         // libs = minimal: exactly the files resolve_profile_data() took from the OS lock, and none with binaries is an error
         std::string lib = d + "/libfoo.so.1";
@@ -790,8 +873,11 @@ int main() {
         CHECK(has_seq(pl3.b.args(), {"--ro-bind", c.session.string() + "/resolv.conf", "/etc/resolv.conf"}));
         CHECK(has_seq(pl3.b.args(), {"--uid", "1000", "--gid", "1000"}));
         CHECK(read_file(c.session / "resolv.conf") == pasta_resolv_conf());
-        Strings pa = pasta_argv("/usr/bin/pasta", {"sh", "-c", "x"});
+        Strings pa = pasta_argv("/usr/bin/pasta", {"sh", "-c", "x"}, "1.1.1.1");
         CHECK(has_seq(pa, {"-T", "none", "-U", "none"}) && has_seq(pa, {"--no-map-gw"}) && has_seq(pa, {"--", "sh", "-c", "x"}));
+        CHECK(has_seq(pa, {"--dns-forward", kPastaDns, "--dns-host", "1.1.1.1", "--", "sh"}));   // the option sits before "--"
+        THROWS(Error, pasta_argv("/usr/bin/pasta", {"sh"}, ""));                            // never pasta's default (the host resolv.conf)
+        THROWS(Error, pasta_argv("/usr/bin/pasta", {"sh"}, "1.1.1.1 --map-host-loopback"));  // never smuggle options onto pasta's argv
         fs::remove_all(d);
     });
 

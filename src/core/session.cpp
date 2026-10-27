@@ -108,7 +108,12 @@ Strings debug_shell(const Profile& p) {
 }
 
 int run_profile(Profile p, RunOptions o) {
-    if (o.net) p.net = *o.net;
+    if (o.net) {
+        if (*o.net != p.net && !o.dns) p.dns.clear();             // the profile's resolver was chosen for its own mode
+        p.net = *o.net;
+    }
+    if (o.dns) p.dns = *o.dns;
+    if (o.net || o.dns) check_dns(p, cat("profile '", p.name, "' with --net/--dns"));
     if (o.wg_conf) p.wg_conf = *o.wg_conf;
     if (o.debug) {
         if (!o.command.empty()) throw Error("--debug replaces the command with a shell; drop the words after `--`");
@@ -175,7 +180,7 @@ int run_profile(Profile p, RunOptions o) {
     if (p.clipboard_out) cb = std::make_unique<ClipboardBridge>(pr.user, sd.path / "clip", p.clipboard_sanitize);
 
     Strings launch = launcher_argv(pr.bwrap, sd.path, plan.b, plan.seccomp);
-    if (c.pasta) launch = pasta_argv(pasta, launch);
+    if (c.pasta) launch = pasta_argv(pasta, launch, p.dns);
     Strings full = ns ? ns->wrap(launch, c.pty_proxy) : as_user(pr.user, launch);
     log::info(cat("starting '", p.name, "' (", p.root == RootMode::Host ? "host-whitelist" : "bundle", " userland, net=",
                   p.net == NetMode::None ? "none" : p.net == NetMode::Host ? "host" : p.net == NetMode::Pasta ? "pasta" : "ivpn", ")"));

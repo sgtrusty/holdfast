@@ -47,14 +47,14 @@ Strings data_roots(const std::string& home) {
     // The data that ships with holdfast sits next to the binary: <prefix>/bin/holdfast -> <prefix>/data. That is
     // /opt/holdfast after `predep install`, and the checkout itself when you run ./bin/holdfast from a clone. The path
     // comes from /proc/self/exe, so a symlink on PATH (e.g. /usr/local/bin/holdfast) still finds it.
+    // Exactly ONE shipped root: the one that belongs to this binary. A checkout's ./bin/holdfast does not also read an
+    // installed /opt/holdfast (or the other way round); /opt/holdfast/data is only the fallback for a binary with no data
+    // next to it.
     std::error_code ec;
     const fs::path exe = fs::read_symlink("/proc/self/exe", ec);
-    if (!ec) {
-        const fs::path shipped = exe.parent_path().parent_path() / "data";
-        if (fs::is_directory(shipped, ec)) r.push_back(shipped.string());
-    }
-    const std::string installed = std::string(HOLDFAST_SHARE_DIR) + "/data";
-    if (std::find(r.begin(), r.end(), installed) == r.end()) r.push_back(installed);
+    const fs::path shipped = ec ? fs::path() : exe.parent_path().parent_path() / "data";
+    const std::string mine = !shipped.empty() && fs::is_directory(shipped, ec) ? shipped.string() : std::string(HOLDFAST_SHARE_DIR) + "/data";
+    if (std::find(r.begin(), r.end(), mine) == r.end()) r.push_back(mine);
     return r;
 }
 
@@ -137,6 +137,24 @@ OsDef parse_os(const std::string& text, const std::string& origin, const std::st
             if (l.key != "bind") bad(l, origin, "unknown key (expected bind)");
             if (!fs::path(l.value).is_absolute()) bad(l, origin, "bind must be an absolute path");
             o.files[arch][lib].push_back(l.value);
+        } else if (l.section == "install") {
+            if (o.kind != OsKind::Bundle) bad(l, origin, "[install] belongs to kind = bundle");
+            if (l.key == "net") {
+                const std::string m = lower(l.value);
+                if (m == "pasta") o.install_net = NetMode::Pasta;
+                else if (m == "none") o.install_net = NetMode::None;
+                else bad(l, origin, "expected pasta|none (host would share abstract sockets with a writable userns-root sandbox)");
+            } else if (l.key == "dns") {
+                if (!is_ipv4_unicast(l.value)) bad(l, origin, "expected an IPv4 address such as 1.1.1.1");
+                o.install_dns = l.value;
+            } else if (l.key == "use") {
+                Strings v;
+                words(v, l.value);
+                for (auto& n : v) if (!valid_data_name(n)) bad(l, origin, "expected lib names (data/lib/NAME.profile): " + n);
+                o.install_use.insert(o.install_use.end(), v.begin(), v.end());
+            } else {
+                bad(l, origin, "unknown key (expected net, dns or use)");
+            }
         } else {
             throw ProfileError(cat(origin, ":", l.no, ": unknown section [", l.section, "]"));
         }
@@ -148,6 +166,12 @@ OsDef parse_os(const std::string& text, const std::string& origin, const std::st
             throw ProfileError(origin + ": [os] alpine_version must be an exact release such as 3.24.3 "
                                         "(moving aliases like latest-stable cannot be pinned or shared)");
         if (o.alpine_mirror.rfind("https://", 0) != 0) throw ProfileError(origin + ": [os] alpine_mirror must be an https:// URL");
+        if (o.install_net == NetMode::None) {
+            // Offline can only reuse a cached tarball, and only a pinned hash lets the cache be trusted without the mirror.
+            if (!o.install_dns.empty()) throw ProfileError(origin + ": [install] dns needs net = pasta");
+            if (!o.packages.empty()) throw ProfileError(origin + ": [install] net = none cannot install packages (apk add needs the network)");
+            if (o.alpine_sha256.empty()) throw ProfileError(origin + ": [install] net = none needs [os] alpine_sha256 (only a pinned, cached tarball can be used offline)");
+        }
     }
     return o;
 }
@@ -284,7 +308,17 @@ Strings list_data(const Strings& roots, const std::string& kind) {
 HostId read_host_id(const fs::path& path) {
     HostId h;
     std::string text;
-    try { text = read_file(path); } catch (const Error&) { return h; }
+    // os-release(5): /etc/os-release is usually a symlink to ../usr/lib/os-release (Arch, Fedora, systemd distros), and
+    // /usr/lib/os-release is the fallback when /etc has none. read_file() refuses symlinks, so resolve this root-owned
+    // system path first.
+    std::vector<fs::path> cands = {path};
+    if (path == "/etc/os-release") cands.emplace_back("/usr/lib/os-release");
+    for (const fs::path& c : cands) {
+        std::error_code ec;
+        const fs::path real = fs::canonical(c, ec);
+        if (ec) continue;
+        try { text = read_file(real, 64u << 10); break; } catch (const Error&) {}
+    }
     std::istringstream in(text);
     for (std::string raw; std::getline(in, raw);) {
         const auto eq = raw.find('=');
@@ -344,6 +378,9 @@ void resolve_profile_data(Profile& p, const Strings& roots) {
         p.alpine_mirror = o.alpine_mirror;
         p.alpine_sha256 = o.alpine_sha256;
         p.apk_packages = o.packages;
+        p.install_net = o.install_net;
+        p.install_dns = o.install_dns;
+        p.install_use = o.install_use;
         p.bundle_id = o.name;                       // every profile naming this os shares one userland
         std::set<std::string> seen_dep;
         p.deps.clear();
@@ -364,7 +401,18 @@ void resolve_profile_data(Profile& p, const Strings& roots) {
     }
     if (p.bins.empty()) return;
 
-    // closure of [libs] use over `needs`; `base` (loader, libc, NSS, locales) is always part of it
+    const HostLibs h = resolve_host_libs(p.lib_use, roots, p.os, "   (or set `libs = full` in [fs])");
+    for (const std::string& tok : p.bins) {
+        const std::string name = tok.substr(0, tok.find('='));
+        if (!h.commands.count(name))
+            throw ProfileError(cat("[bin] allow '", name, "' is not provided by any lib in [libs] use (", join(p.lib_use, " "),
+                                   "); add the lib that lists it (data/lib/*.profile), define one, or set `libs = full` in [fs]"));
+    }
+    p.lib_binds = h.files;
+}
+
+HostLibs resolve_host_libs(const Strings& use, const Strings& roots, const std::string& os_pin, const std::string& alt) {
+    // closure of `use` over `needs`; `base` (loader, libc, NSS, locales) is always part of it
     std::vector<LibDef> libs;
     std::set<std::string> seen;
     std::function<void(const std::string&)> add = [&](const std::string& n) {
@@ -374,43 +422,36 @@ void resolve_profile_data(Profile& p, const Strings& roots) {
         for (const auto& dep : deps) add(dep);
     };
     add("base");
-    for (const auto& n : p.lib_use) add(n);
+    for (const auto& n : use) add(n);
 
-    std::set<std::string> provided;
-    for (const auto& l : libs) provided.insert(l.commands.begin(), l.commands.end());
-    for (const std::string& tok : p.bins) {
-        const std::string name = tok.substr(0, tok.find('='));
-        if (!provided.count(name))
-            throw ProfileError(cat("[bin] allow '", name, "' is not provided by any lib in [libs] use (", join(p.lib_use, " "),
-                                   "); add the lib that lists it (data/lib/*.profile), define one, or set `libs = full` in [fs]"));
-    }
+    HostLibs h;
+    for (const auto& l : libs) h.commands.insert(l.commands.begin(), l.commands.end());
 
     OsDef os;
-    if (!p.os.empty()) {
-        os = load_os(p.os, roots);
-        if (os.kind != OsKind::Host) throw ProfileError(cat("os '", p.os, "' is a bundle definition; host profiles need kind = host"));
+    if (!os_pin.empty()) {
+        os = load_os(os_pin, roots);
+        if (os.kind != OsKind::Host) throw ProfileError(cat("os '", os_pin, "' is a bundle definition; host libraries need a kind = host file"));
     } else {
-        const HostId h = read_host_id();
-        auto m = match_host_os(roots, h);
+        const HostId hid = read_host_id();
+        auto m = match_host_os(roots, hid);
         if (!m)
-            throw ProfileError(cat("no data/os definition matches this host (", h.id, " ", h.version,
-                                   "); create one with: HOLDFAST_DATA=<your data dir> holdfast libs --refresh ", suggest_os_name(h),
-                                   "   (or set `libs = full` in [fs])"));
+            throw ProfileError(cat("no data/os definition matches this host (", hid.id, " ", hid.version,
+                                   "); create one with: holdfast libs --refresh   (writes ~/.config/holdfast/data/os/", suggest_os_name(hid), ".profile)", alt));
         os = *m;
     }
+    h.os = os.name;
     const std::string arch = host_arch();
     auto by_arch = os.files.find(arch);
-    Strings all;
     for (const auto& l : libs) {
         if (by_arch == os.files.end() || !by_arch->second.count(l.name))
             throw ProfileError(cat("os '", os.name, "' has no file list for lib '", l.name, "' on ", arch,
                                    "; scan this system and save it: holdfast libs --refresh ", os.name));
         const Strings& v = by_arch->second.at(l.name);
-        all.insert(all.end(), v.begin(), v.end());
+        h.files.insert(h.files.end(), v.begin(), v.end());
     }
-    std::sort(all.begin(), all.end());
-    all.erase(std::unique(all.begin(), all.end()), all.end());
-    p.lib_binds = all;
+    std::sort(h.files.begin(), h.files.end());
+    h.files.erase(std::unique(h.files.begin(), h.files.end()), h.files.end());
+    return h;
 }
 
 }  // namespace hf

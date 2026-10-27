@@ -30,6 +30,8 @@ Strings split_words(std::string_view s);   // shell-ish: '..', "..", backslash
 std::string shell_quote(std::string_view s);
 std::string join(const Strings& v, std::string_view sep);
 bool is_hex(std::string_view s, size_t len);
+// A dotted-quad IPv4 address a host could send unicast to: not 0.0.0.0/8, multicast, reserved or broadcast.
+bool is_ipv4_unicast(const std::string& s);
 
 // Lexically normalise: collapse "..", ".", duplicate and trailing slashes.
 fs::path norm(const fs::path& p);

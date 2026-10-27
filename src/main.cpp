@@ -57,10 +57,13 @@ static int cmd_list(const Strings& a, bool verbose) {
         }
         return 0;
     }
+    for (const std::string& d : legacy_profile_dirs(home)) {
+        std::error_code ec;
+        for (fs::directory_iterator it(d, ec), end; !ec && it != end; it.increment(ec))
+            if (it->path().extension() == ".profile")
+                log::warn(cat("not searched any more: ", it->path().string(), "; move it to ", home, "/.config/holdfast/data/profile/"));
+    }
     Strings dirs;
-    if (const char* e = std::getenv("HOLDFAST_PROFILES")) dirs.push_back(e);
-    if (!home.empty()) dirs.push_back(home + "/.config/holdfast/profiles");
-    dirs.push_back("/etc/holdfast/profiles");
     for (const auto& r : roots) dirs.push_back(r + "/profile");
     std::set<std::string> seen;
     for (auto& d : dirs) {

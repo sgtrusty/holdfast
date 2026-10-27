@@ -131,6 +131,10 @@ Profile parse_profile(const std::string& text, const std::string& o) {
                 else if (x == "ivpn" || x == "wireguard") p.net = NetMode::Ivpn;
                 else bad(l, o, "expected none|pasta|host|ivpn");
             }
+            else if (k == "dns") {
+                if (lower(v) != "host" && !is_ipv4_unicast(v)) bad(l, o, "expected an IPv4 address such as 1.1.1.1, or host (mode = host only)");
+                p.dns = lower(v) == "host" ? "host" : v;
+            }
             else if (k == "wg_conf") p.wg_conf = v;
             else if (k == "ns_name") p.ns_name = v;
             else if (k == "verify") p.net_verify = as_bool(l, o);
@@ -187,7 +191,27 @@ Profile parse_profile(const std::string& text, const std::string& o) {
             throw ProfileError(cat(o, ":", l.no, ": unknown section [", s, "]"));
         }
     }
+    check_dns(p, o);
     return p;
+}
+
+void check_dns(const Profile& p, const std::string& o) {
+    // The host's /etc/resolv.conf never enters a sandbox by default: the resolver is a choice the profile makes.
+    switch (p.net) {
+    case NetMode::Pasta:
+        if (p.dns.empty() || p.dns == "host")
+            throw ProfileError(cat(o, ": network mode pasta needs dns = <IPv4 resolver>, e.g. dns = 1.1.1.1 ([network] dns, or --dns= on the command line)"));
+        break;
+    case NetMode::Host:
+        if (p.dns.empty())
+            throw ProfileError(cat(o, ": network mode host needs dns = <IPv4 resolver> (written to the sandbox's /etc/resolv.conf), "
+                                      "or dns = host to mount the host's /etc/resolv.conf ([network] dns, or --dns= on the command line)"));
+        break;
+    case NetMode::None:
+    case NetMode::Ivpn:                                             // the tunnel's DNS comes from the WireGuard config
+        if (!p.dns.empty()) throw ProfileError(cat(o, ": dns only applies to network mode pasta or host"));
+        break;
+    }
 }
 
 Profile load_profile_file(const fs::path& path) {
@@ -204,13 +228,29 @@ fs::path find_profile(const std::string& n, const std::string& home) {
         if (!fs::is_regular_file(n)) throw Error("profile not found: " + n);
         return n;
     }
-    Strings cands;
-    if (const char* e = std::getenv("HOLDFAST_PROFILES")) cands.push_back(cat(e, "/", n, ".profile"));
-    cands.push_back(cat(home, "/.config/holdfast/profiles/", n, ".profile"));
-    cands.push_back(cat("/etc/holdfast/profiles/", n, ".profile"));
-    for (const auto& r : data_roots(home)) cands.push_back(cat(r, "/profile/", n, ".profile"));   // shipped/shared data dirs
-    for (auto& c : cands) if (fs::is_regular_file(c)) return c;
-    throw Error(cat("profile '", n, "' not found; searched:\n  ", join(cands, "\n  ")));
+    // One layout for every kind of data file: <data root>/profile/NAME.profile, first root wins (data_roots()).
+    const Strings roots = data_roots(home);
+    if (auto f = find_data(roots, "profile", n)) return *f;
+    // The old separate profile folders are not searched any more. A file left there must not be silently ignored.
+    for (const std::string& d : legacy_profile_dirs(home))
+        if (fs::is_regular_file(cat(d, "/", n, ".profile")))
+            throw Error(cat("found ", d, "/", n, ".profile, but profiles now live in ", home, "/.config/holdfast/data/profile/ ",
+                            "(or /etc/holdfast/data/profile/, $HOLDFAST_DATA/profile/); move it there"));
+    Strings close;
+    for (const std::string& c : list_data(roots, "profile"))
+        if (c.find(n) != std::string::npos || n.find(c) != std::string::npos) close.push_back(c);
+    Strings dirs;
+    for (const auto& r : roots) dirs.push_back(r + "/profile");
+    throw Error(cat("profile '", n, "' not found", close.empty() ? "" : cat("; did you mean: ", join(close, ", "), "?"),
+                    "\n(searched ", join(dirs, ", "), "; `holdfast list` shows every profile)"));
+}
+
+Strings legacy_profile_dirs(const std::string& home) {
+    Strings d;
+    if (const char* e = std::getenv("HOLDFAST_PROFILES"); e && *e) d.push_back(e);
+    if (!home.empty()) d.push_back(home + "/.config/holdfast/profiles");
+    d.push_back("/etc/holdfast/profiles");
+    return d;
 }
 
 }  // namespace hf

@@ -7,7 +7,7 @@ warning.
 
 ```
 holdfast run lazyvim              # offline editor, current dir mounted at /shared, .git read-only
-holdfast run --net=pasta lazyvim  # same, online ("sync" mode) through a private pasta netns
+holdfast run --net=pasta --dns=1.1.1.1 lazyvim  # same, online ("sync" mode) through a private pasta netns
 holdfast run librewolf-ivpn       # amnesic browser, nested X, all traffic via a WireGuard netns
 holdfast run lazygit-dev          # first run sets up its private Alpine userland (in sandboxes), then runs in it
 holdfast run --debug lazyvim      # a shell (bash, else sh) inside that exact sandbox, to test or configure

@@ -14,11 +14,13 @@ namespace hf {
 
 namespace {
 
-// Where a NEW os file goes: $HOLDFAST_DATA if set (the repo's data/ while developing), else the user's config.
-fs::path new_os_path(const std::string& home, const std::string& name) {
+// Where `--refresh` writes, always: $HOLDFAST_DATA if set (the repo's data/ while developing), else the user's own data dir.
+// Never the file it was read from: that may be the shipped data (/opt/holdfast, a checkout), which is not the user's to
+// rewrite. The user copy comes first in data_roots(), so it shadows a shipped file of the same name.
+fs::path user_os_path(const std::string& home, const std::string& name) {
     fs::path root = (std::getenv("HOLDFAST_DATA") && *std::getenv("HOLDFAST_DATA")) ? fs::path(std::getenv("HOLDFAST_DATA"))
                                                                                      : fs::path(home) / ".config/holdfast/data";
-    return root / "os" / (name + ".os");
+    return root / "os" / (name + ".profile");                       // find_data() only looks for .profile
 }
 
 }  // namespace
@@ -40,13 +42,34 @@ int cmd_libs(const std::string& name_arg, bool check, bool refresh) {
     if (libs.empty()) throw Error("no data/lib/*.lib found (searched: " + join(roots, ", ") + ")");
     Policy pol(u, {});
     std::map<std::string, Strings> fresh;                            // lib -> sandbox paths on this host
+    std::map<std::string, std::string> failed;                       // lib -> why it cannot be listed on this host
     for (const std::string& ln : libs) {
-        Strings v;
-        for (const auto& [src, dst] : resolve_lib(load_lib(ln, roots), pol)) v.push_back(dst.string());
-        std::sort(v.begin(), v.end());
-        fresh[ln] = v;
-        log::info(cat("lib ", ln, ": ", v.size(), " files"));
+        // One lib that cannot be analysed here (e.g. a python with 50k+ files) must not take the others down. It gets
+        // NO file list, so every profile or [install] use naming it fails with "no file list for lib" (fail closed).
+        try {
+            Strings v;
+            for (const auto& [src, dst] : resolve_lib(load_lib(ln, roots), pol)) v.push_back(dst.string());
+            std::sort(v.begin(), v.end());
+            fresh[ln] = v;
+            // Libs list alternative names across distros (dash, mawk, fdfind, vi): a missing one is normal, all missing is not.
+            const LibDef def = load_lib(ln, roots);
+            Strings absent, present;
+            for (const auto& c : def.commands) (which(c) ? present : absent).push_back(c);
+            std::string note = absent.empty() ? "" : cat(" (not on this host: ", join(absent, " "), ")");
+            if (!def.commands.empty() && present.empty()) log::warn(cat("lib ", ln, ": none of its commands is installed here", note));
+            else log::info(cat("lib ", ln, ": ", v.size(), " files", note));
+        } catch (const Error& e) {
+            failed[ln] = e.what();
+            log::error(cat("lib ", ln, ": not listed for this host: ", e.what()));
+        }
     }
+    const auto report_failed = [&] {
+        if (failed.empty()) return;
+        Strings names;
+        for (const auto& [n, why] : failed) names.push_back(n);
+        log::error(cat(failed.size(), " lib(s) have no file list for this host and cannot be used by `libs = minimal` profiles or [install] use: ",
+                       join(names, " "), " (see the errors above; fix the data/lib file or use `libs = full` where you need it)"));
+    };
 
     if (check) {
         const auto it = old->files.find(arch);
@@ -65,10 +88,12 @@ int cmd_libs(const std::string& name_arg, bool check, bool refresh) {
             for (const auto& f : a) if (!b.count(f)) emit("+", lib, f);
             for (const auto& f : b) if (!a.count(f)) emit("-", lib, f);
         }
-        for (const auto& [lib, files] : have) if (!fresh.count(lib)) emit("-", lib, "(no such data/lib file)");
+        for (const auto& [lib, files] : have)
+            if (!fresh.count(lib)) emit("-", lib, failed.count(lib) ? "(cannot be analysed on this host)" : "(no such data/lib file)");
+        report_failed();
         if (diff) log::error(cat("os '", name, "': saved file list for ", arch, " differs from this host (", diff, " differences); update it with: holdfast libs --refresh ", name));
         else log::info(cat("os '", name, "': saved file list for ", arch, " is up to date"));
-        return diff ? 1 : 0;
+        return diff || !failed.empty() ? 1 : 0;
     }
 
     OsDef out;
@@ -77,13 +102,17 @@ int cmd_libs(const std::string& name_arg, bool check, bool refresh) {
     out.id = old ? old->id : host.id;
     out.version = old ? old->version : host.version;
     out.description = old ? old->description : "";
-    if (out.id.empty()) throw Error("cannot determine the OS id (/etc/os-release has no ID=); create the file by hand with [os] id = ...");
+    if (out.id.empty())
+        throw Error("cannot determine the OS id: neither /etc/os-release nor /usr/lib/os-release could be read or has an ID= line; "
+                    "create the file by hand with [os] id = ...");
     if (old) out.files = old->files;                                  // keep other architectures
     out.files[arch] = fresh;
     const std::string text = render_os(out);
 
-    if (!refresh) { std::fputs(text.c_str(), stdout); return 0; }
-    const fs::path target = old ? old->file : new_os_path(u.home.string(), name);
+    if (!refresh) { std::fputs(text.c_str(), stdout); report_failed(); return failed.empty() ? 0 : 1; }
+    const fs::path target = user_os_path(u.home.string(), name);
+    if (old && fs::path(old->file) != target)
+        log::info(cat("based on ", old->file.string(), " (left untouched; its other architectures are kept in the new file)"));
     std::error_code ec;
     fs::create_directories(target.parent_path(), ec);
     const fs::path tmp = target.string() + ".tmp";
@@ -91,7 +120,8 @@ int cmd_libs(const std::string& name_arg, bool check, bool refresh) {
     fs::rename(tmp, target, ec);
     if (ec) throw Error(cat("cannot write ", target.string(), ": ", ec.message()));
     log::info("wrote " + target.string());
-    return 0;
+    report_failed();
+    return failed.empty() ? 0 : 1;
 }
 
 }  // namespace hf

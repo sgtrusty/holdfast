@@ -33,9 +33,11 @@ The same word, **refresh**, is used for bundles: `holdfast run --refresh PROFILE
 
 ## Search order
 
-First match wins: `$HOLDFAST_DATA`, `$HOLDFAST_SHARE/data`, `~/.config/holdfast/data`, `/etc/holdfast/data`,
-`<share dir>/data` (installed by `predep install`). A user file therefore overrides a shipped one of the same name.
-Profiles are also still found in `$HOLDFAST_PROFILES`, `~/.config/holdfast/profiles`, `/etc/holdfast/profiles`.
+First match wins: `$HOLDFAST_DATA`, `$HOLDFAST_SHARE/data`, `~/.config/holdfast/data`, `/etc/holdfast/data`, then ONE
+shipped root: `data/` next to the binary (a checkout, or `/opt/holdfast` after `predep install`), else `/opt/holdfast/data`.
+A user file therefore overrides a shipped one of the same name. Profiles follow the same layout (`<root>/profile/`).
+The old `$HOLDFAST_PROFILES`, `~/.config/holdfast/profiles` and `/etc/holdfast/profiles` are not searched; a profile left
+there is an error that says where to move it.
 `holdfast list`, `holdfast list libs`, `holdfast list os` show what is visible.
 
 ## `data/lib/NAME.profile`
@@ -63,7 +65,26 @@ kind = bundle
 alpine_version = 3.24.3            # an exact release is required (fetched by name; latest-stable / v3.24 / edge are rejected)
 alpine_sha256  = f8e1caf...        # pin the tarball (strongly recommended; without it only the mirror's own .sha256 is checked)
 packages = ca-certificates build-base git bash curl go rust cargo
+# Downloaded tarballs are kept in <data>/cache/alpine/<arch>/ (<data> = $HOLDFAST_HOME or ~/.local/share/holdfast)
+# and reused while they match alpine_sha256.
+
+[install]                          # how the install steps (fetch, apk, pasta deps) reach the network
+net = pasta                        # pasta (default) | none
+dns = 1.1.1.1                      # IPv4 resolver for pasta; required once an install step uses the network
+use = shell archive coreutils net certs   # data/lib names: the ONLY host files the download sandbox mounts
 ```
+
+`[install]` only changes how the userland is fetched, not what it contains, so it is not part of the bundle's stamp.
+- `net = none` builds offline: it needs a pinned `alpine_sha256` and the tarball already in the cache, and no `packages`
+  (apk needs the network). `host` is refused: these sandboxes are writable and userns-root.
+- `dns` is the resolver for the fetch, `apk add` and every dep with `[network] mode = pasta`. There is no fallback, neither to
+  a profile's `[network] dns` nor to the host's `/etc/resolv.conf`: a step that needs the network without it is refused
+  before anything is created.
+- `use` (required to build the userland): the download runs the host's `sh tar gzip sha256sum cut chmod rm mkdir mv` (and
+  `curl` with `net = pasta`). Only the files the listed libs (plus `base`) have in this host's `kind = host` os file are
+  mounted, read-only, exactly like a `libs = minimal` profile: no library directories, no `/etc/ld.so.cache`. Create that
+  file once with `holdfast libs --refresh`. A tool no listed lib provides is an error that names it.
+- Both install sandboxes run under the default seccomp filter unless the profile says `seccomp = none`.
 
 Every profile with `[profile] os = NAME` shares `<data>/bundles/NAME/rootfs`; the fake `$HOME` and the deps installed into
 it stay per profile. The first `holdfast run` of any of them creates the userland (inside sandboxes), and
@@ -89,6 +110,11 @@ HOLDFAST_DATA=./data holdfast libs --refresh          # on a debian 12 box: crea
 HOLDFAST_DATA=./data holdfast libs --check            # CI / after upgrades: exit 1 and a `+`/`-` diff if this host drifted
 holdfast libs                                          # print instead of saving (do not redirect onto the file it reads)
 ```
+
+`--refresh` always writes to `$HOLDFAST_DATA/os/` if set, else `~/.config/holdfast/data/os/NAME.profile`, never back into
+the shipped data (`/opt/holdfast/data`, a checkout). The user copy is searched first, so it shadows a shipped file.
+A lib that cannot be analysed on this host (e.g. a python with more than 50000 files) is reported and gets no file list;
+the others are still written, and the command exits 1.
 
 `holdfast libs` reads ELF headers of every lib's commands and sonames on THIS host (nothing is executed) and keeps the
 `[files.*]` sections of other architectures already in the file.
@@ -138,7 +164,7 @@ What happens, per dep:
 
 **The one special step is not a dep:** installing the `data/os` file's `packages` with `apk add`. A package manager must own
 the whole userland, so that sandbox is deliberately different: the rootfs is writable, `--uid 0` makes it userns-root (your
-uid mapped to 0, no real privilege), and the network is pasta's. holdfast says so when it runs; it lives in
+uid mapped to 0, no real privilege), and the network is pasta's (or none, see `[install]`). holdfast says so when it runs; it lives in
 `install_os_packages()` in `src/core/bundle.cpp`.
 
 ## `data/display/NAME.profile`

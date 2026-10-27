@@ -22,7 +22,9 @@ Strings launcher_argv(const fs::path& bwrap, const fs::path& session, const ArgB
 fs::path find_pasta();                       // throws if missing
 inline constexpr const char* kPastaDns = "192.0.2.53";   // RFC 5737 TEST-NET-1: intercepted by pasta --dns-forward
 std::string pasta_resolv_conf();             // /etc/resolv.conf for the sandbox
-Strings pasta_argv(const fs::path& pasta, const Strings& inner);
+// dns_host: the IPv4 resolver pasta forwards kPastaDns queries to, always explicit (a profile's [network] dns or the os
+// file's [install] dns). There is no fallback to the host's /etc/resolv.conf: an empty or invalid value throws.
+Strings pasta_argv(const fs::path& pasta, const Strings& inner, const std::string& dns_host);
 
 // Runs argv in the foreground, forwarding SIGTERM/SIGHUP, returns the exit code.
 int run_with_signals(const Strings& argv);

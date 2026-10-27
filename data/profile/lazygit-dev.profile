@@ -17,7 +17,8 @@ cwd         = ask
 new_session = no
 
 [deps]
-# Install steps (data/dep/NAME.profile), run once into this profile's persistent $HOME with network via pasta. Each
+# Install steps (data/dep/NAME.profile), run once into this profile's persistent $HOME; those with network use pasta
+# and the resolver from data/os/alpine-3.24-dev.profile [install] dns. Each
 # recipe is stamped on its own: a new dep installs on the next run, an edited recipe asks for --refresh.
 use = lazygit delta difftastic diff-so-fancy
 

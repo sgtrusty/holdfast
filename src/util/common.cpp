@@ -1,5 +1,7 @@
 #include "util/common.hpp"
 
+#include <arpa/inet.h>
+
 #include <algorithm>
 #include <cctype>
 
@@ -77,6 +79,13 @@ std::string join(const Strings& v, std::string_view sep) {
 bool is_hex(std::string_view s, size_t len) {
     if (s.size() != len) return false;
     return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isxdigit(c); });
+}
+
+bool is_ipv4_unicast(const std::string& s) {
+    in_addr a{};
+    if (inet_pton(AF_INET, s.c_str(), &a) != 1) return false;     // strict dotted quad: no "1.1", no spaces, no IPv6
+    const unsigned first = ntohl(a.s_addr) >> 24;
+    return first != 0 && first < 224;
 }
 
 fs::path norm(const fs::path& p) {

@@ -188,7 +188,7 @@ std::vector<std::pair<fs::path, fs::path>> resolve_lib(const LibDef& d, const Po
 
     for (const std::string& cmd : d.commands) {
         auto host = which(cmd);
-        if (!host) { log::warn(cat("lib '", d.name, "': command not found on this host, skipped: ", cmd)); continue; }
+        if (!host) { log::debug(cat("lib '", d.name, "': command not on this host, skipped: ", cmd)); continue; }   // summarised by `holdfast libs`
         c.enqueue(canon(*host));
     }
     for (const std::string& pat : d.sonames)

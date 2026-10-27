@@ -81,6 +81,7 @@ struct Profile {
 
     // [network]
     NetMode net = NetMode::None;
+    std::string dns;               // [network] dns: IPv4 resolver (pasta: forwarded to; host: written to resolv.conf) or "host" (mode host)
     std::string wg_conf, ns_name;
     bool net_verify = true;
     int subnet_octet = 0;          // 0 => derived from ns name
@@ -108,12 +109,21 @@ struct Profile {
     std::string alpine_mirror = "https://dl-cdn.alpinelinux.org/alpine";
     std::string alpine_sha256;     // optional pin of the minirootfs tarball
     Strings apk_packages;
+    NetMode install_net = NetMode::Pasta;   // the os file's [install]: network of the fetch and apk sandboxes
+    std::string install_dns;       // its dns: required when an install step (fetch, apk, a pasta dep) uses the network
+    Strings install_use;           // its use: the data/lib names the bootstrap may mount from the host
     std::vector<DepRecipe> deps;   // in `use` order
 };
 
 Profile parse_profile(const std::string& text, const std::string& origin);
+// pasta needs an IPv4 dns; host needs an IPv4 dns or `host`; none/ivpn take none. Re-checked after --net/--dns overrides.
+void check_dns(const Profile& p, const std::string& origin);
 Profile load_profile_file(const fs::path& p);
 // Resolve "name" or a path to a profile file.
+// A path (contains '/' or ends in .profile) is used as is; a name is <data root>/profile/NAME.profile, first root wins.
 fs::path find_profile(const std::string& name_or_path, const std::string& home);
+// Folders older versions searched ($HOLDFAST_PROFILES, ~/.config/holdfast/profiles, /etc/holdfast/profiles): only checked
+// so a profile left there is an error that says where to move it, never silently ignored.
+Strings legacy_profile_dirs(const std::string& home);
 
 }  // namespace hf

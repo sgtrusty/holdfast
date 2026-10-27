@@ -22,12 +22,12 @@ holdfast run [options] PROFILE [-- COMMAND [ARGS...]]
 - **Fail closed.** An unknown key, a missing bundle, a denied mount or a missing library list is an error with a message
   that says what to run or change. Fix the profile; do not look for a way around the check.
 - Useful options: `-y` (do not ask before mounting the working tree), `--cwd=DIR` (mount DIR, implies yes),
-  `--no-cwd`, `--net=none|pasta|host|ivpn`, `-n` (same as `print`), `-v`.
+  `--no-cwd`, `--net=none|pasta|host|ivpn`, `--dns=IPV4|host` (required with `--net=pasta`/`host` unless the profile sets `dns`), `-n` (same as `print`), `-v`.
 - Dry runs: `holdfast print PROFILE` shows the exact `bwrap` argv and changes nothing; `holdfast check PROFILE` validates.
 - Debugging a profile: `holdfast run --debug PROFILE` opens `bash` (else `sh`) in that exact sandbox instead of its command:
   same mounts, network, seccomp and terminal filter, nothing added. A host profile needs `bash` or `sh` in `[bin] allow`.
   `holdfast print --debug PROFILE` shows the argv it would use. Not for scripts: it is an interactive shell.
-- State and data locations can be overridden for tests and CI: `HOLDFAST_HOME` (state), `HOLDFAST_PROFILES`, `HOLDFAST_DATA`.
+- State and data locations can be overridden for tests and CI: `HOLDFAST_HOME` (state), `HOLDFAST_DATA` (profiles go in its `profile/`).
 
 ## Calling it
 
@@ -71,7 +71,7 @@ libs = full                  # zero setup. `libs = minimal` (the default) additi
 user = agent
 ```
 
-Network is off unless you ask: `--net=pasta` (private namespace, outbound only) is the way to give a sandbox internet.
+Network is off unless you ask: `--net=pasta --dns=1.1.1.1` (private namespace, outbound only, an explicit resolver) is the way to give a sandbox internet.
 Reference: `docs/PROFILE_REFERENCE.md`. Concepts: `docs/CONCEPTS.md`.
 
 ## Rules for agents and automation

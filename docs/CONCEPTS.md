@@ -1,11 +1,11 @@
 # Concepts
 
-**Profile**: an INI file describing one sandbox (`docs/PROFILE_REFERENCE.md`). It is found by name in
-`$HOLDFAST_PROFILES`, `~/.config/holdfast/profiles/`, `/etc/holdfast/profiles/`, then the `profile/` directory of each
-data dir (`docs/DATA.md`), or passed as a path. Unknown sections and keys are errors. The data that ships with holdfast
+**Profile**: an INI file describing one sandbox (`docs/PROFILE_REFERENCE.md`). It is found by name in the
+`profile/` directory of each data dir (`~/.config/holdfast/data`, `/etc/holdfast/data`, the shipped data; `docs/DATA.md`),
+or passed as a path. Unknown sections and keys are errors. The data that ships with holdfast
 (`data/profile`, `data/lib`, `data/os`) is found next to the binary: in a checkout, or under `/opt/holdfast` after
 `predep install`, so the example profiles run by name with nothing to copy. `holdfast list -v` shows what is visible and
-where it came from; to customise one, copy its file into `~/.config/holdfast/profiles/` and edit it.
+where it came from; to customise one, copy its file into `~/.config/holdfast/data/profile/` and edit it.
 
 ## Userland modes
 

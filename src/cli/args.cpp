@@ -48,6 +48,7 @@ void print_usage(FILE* f) {
     row("-y, --yes", "don't ask before mounting the working tree");
     row("--cwd=DIR, --no-cwd", "mount DIR / mount no working tree");
     row("--net=none|pasta|host|ivpn", "override the profile's network mode");
+    row("--dns=IPV4|host", "resolver for pasta/host networks (host: mount /etc/resolv.conf)");
     row("--wg=FILE", "WireGuard config (ivpn)");
     row("--debug", "run: open bash (or sh) in the sandbox, not the command");
     row("-n, --dry-run", "same as print");
@@ -83,6 +84,11 @@ Cli parse_args(const std::string& cmd, const Strings& rest) {
         else if (a == "--check") c.check = true;
         else if (a == "--debug") c.run.debug = true;
         else if (a.rfind("--net=", 0) == 0) c.run.net = parse_net(a.substr(6));
+        else if (a.rfind("--dns=", 0) == 0) {
+            const std::string v = lower(a.substr(6));
+            if (v != "host" && !is_ipv4_unicast(v)) throw Error("--dns expects an IPv4 address (e.g. --dns=1.1.1.1) or host");
+            c.run.dns = v;
+        }
         else if (a.rfind("--wg=", 0) == 0) c.run.wg_conf = a.substr(5);
         else if (a.rfind("--cwd=", 0) == 0) c.run.cwd = a.substr(6);
         else if (!a.empty() && a[0] == '-') throw Error("unknown option: " + a + " (see holdfast help)");

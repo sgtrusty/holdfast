@@ -55,10 +55,8 @@ pass = EDITOR_MODE
 unset = DBUS_SESSION_BUS_ADDRESS
 
 [network]
-mode = none                   # override per run with --net=pasta (preferred over host)
-
-[display]
-mode = none
+mode = none                   # override per run with --net=pasta --dns=1.1.1.1 (preferred over host)
+# no [display]: leaving `use` out means no display at all
 
 [clipboard]
 # Inside the sandbox:  printf '%s' "$TEXT" > /tmp/clip_pipe   -> lands in the HOST clipboard.

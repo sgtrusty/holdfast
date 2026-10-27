@@ -14,6 +14,7 @@ struct RunOptions {
     bool debug = false;                 // --debug: an interactive shell in this exact sandbox instead of the profile's command
     std::optional<fs::path> cwd;
     std::optional<NetMode> net;
+    std::optional<std::string> dns;     // --dns=IPv4|host: overrides [network] dns (validated by check_dns)
     std::optional<std::string> wg_conf;
     Strings command;                    // overrides [profile] command
 };

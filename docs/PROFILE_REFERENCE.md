@@ -50,11 +50,21 @@ The fake home is persistent at `<data>/profiles/<name>/home`.
 The environment is otherwise cleared.
 
 ## [network]
-`mode = none|pasta|host|ivpn` · `wg_conf` (ivpn) · `ns_name` (default `hf-<name>`) · `subnet` (1-254, default derived) · `verify = yes|no`.
+`mode = none|pasta|host|ivpn` · `dns` (pasta) · `wg_conf` (ivpn) · `ns_name` (default `hf-<name>`) · `subnet` (1-254, default derived) · `verify = yes|no`.
 
 `pasta`: private network namespace with outbound internet via `pasta` (package `passt`). Host loopback services and
 inbound ports are unreachable, and host *abstract* unix sockets (X11, D-Bus) are not shared. `host` shares the host
 network namespace and therefore those sockets: prefer `pasta`. The LAN is reachable in both.
+
+`dns` (**required** with `mode = pasta` and `mode = host`; `--dns=` on the command line overrides it). The host's
+`/etc/resolv.conf` never enters a sandbox unless you ask for it:
+- `pasta`: an IPv4 address. pasta forwards the sandbox's queries to it (`--dns-host`); the sandbox's `/etc/resolv.conf`
+  points at pasta's forwarder. pasta itself still opens the host's resolv.conf at startup and may print "Couldn't get any
+  nameserver address"; that is harmless, because what it reads there is not used.
+- `host`: an IPv4 address (written to the sandbox's `/etc/resolv.conf`), or `dns = host` to mount the host's file.
+- `ivpn` takes DNS from the WireGuard config and `none` has no network: `dns` there is an error.
+
+Deps and the userland install steps do not use this key; they use the os file's `[install] dns`.
 
 ### Default seccomp filter
 `seccomp = default` returns EPERM for: kexec/module/reboot, `bpf`, `perf_event_open`, `userfaultfd`, `io_uring_*`,

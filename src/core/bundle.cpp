@@ -48,6 +48,72 @@ std::string read_stamp(const fs::path& f) {
 }
 fs::path dep_stamp_path(const Paths& paths, const DepRecipe& d) { return paths.state / "deps" / (d.name + ".stamp"); }
 
+// The network of the two install sandboxes comes from the os file's [install]: pasta's private namespace, or none
+// (bwrap's --unshare-all then keeps the network namespace unshared).
+void install_network(ArgBuilder& b, const Profile& p) {
+    b.flag("--unshare-all").flag("--unshare-user");
+    if (p.install_net == NetMode::Pasta) b.flag("--share-net");
+}
+
+// Separate from install_network: in the apk sandbox it must come after the rootfs is bound at / (parents before children).
+void install_resolv(ArgBuilder& b, const Profile& p, const fs::path& session) {
+    if (p.install_net != NetMode::Pasta) return;
+    write_file(session / "resolv.conf", pasta_resolv_conf(), 0644);   // network is pasta's private namespace; see launch.hpp
+    b.ro_bind(session / "resolv.conf", "/etc/resolv.conf");
+}
+
+Strings install_launch(const Profile& p, const User& u, const fs::path& session, const ArgBuilder& b, const fs::path& seccomp) {
+    Strings v = launcher_argv(find_bwrap(), session, b, seccomp);
+    if (p.install_net == NetMode::Pasta) v = pasta_argv(find_pasta(), v, p.install_dns);
+    return as_user(u, v);
+}
+
+std::string install_net_desc(const Profile& p) {
+    if (p.install_net != NetMode::Pasta) return "no network";
+    return cat("network via pasta, DNS ", p.install_dns);
+}
+
+// Checked before anything is created, so a missing setting is one sentence instead of a half-built userland.
+void require_install_dns(const Profile& p, const std::string& what) {
+    if (p.install_net == NetMode::Pasta && p.install_dns.empty())
+        throw ProfileError(cat(what, " needs the network, and holdfast does not fall back to the host's /etc/resolv.conf: set the resolver "
+                               "in data/os/", p.os, ".profile:\n  [install]\n  dns = 1.1.1.1"));
+}
+
+// The bootstrap runs HOST binaries (sh, tar, sha256sum, curl, ...). What it may mount from the host is exactly what the os
+// file's `[install] use` lists, resolved like a `libs = minimal` profile: those libs' saved files on this OS, never whole
+// library directories, never /etc/ld.so.cache. Resolved before anything is created.
+Strings bootstrap_tools(const Profile& p) {
+    Strings t = {"sh", "tar", "gzip", "sha256sum", "cut", "chmod", "rm", "mkdir", "mv"};
+    if (p.install_net == NetMode::Pasta) t.push_back("curl");    // offline uses the cached tarball only
+    return t;
+}
+
+HostLibs require_host_tools(const Profile& p, const User& u) {
+    const std::string fix = cat("data/os/", p.os, ".profile");
+    if (p.install_use.empty())
+        throw ProfileError(cat("setting up the Alpine userland runs host tools (", join(bootstrap_tools(p), " "), ") in a sandbox, and nothing from "
+                               "the host is mounted unless you list it. Declare the libs that provide them in ", fix, ":\n  [install]\n"
+                               "  use = shell archive coreutils", p.install_net == NetMode::Pasta ? " net certs" : "",
+                               "\n(data/lib/*.profile; their files on this host come from `holdfast libs --refresh`)"));
+    HostLibs h = resolve_host_libs(p.install_use, data_roots(u.home.string()), "");
+    Strings missing;
+    for (const std::string& t : bootstrap_tools(p)) if (!h.commands.count(t)) missing.push_back(t);
+    if (!missing.empty())
+        throw ProfileError(cat("[install] use = ", join(p.install_use, " "), " in ", fix, " does not provide: ", join(missing, " "),
+                               "; add the data/lib that lists them"));
+    return h;
+}
+
+// The install sandboxes get the default filter unless the profile turned seccomp off (a custom BPF file is written for
+// the profile's own programs, not for curl/tar/apk).
+fs::path install_seccomp(const Profile& p, const fs::path& session) {
+    if (p.seccomp == "none") return {};
+    fs::path f = session / "seccomp.bpf";
+    write_default_seccomp(f);
+    return f;
+}
+
 // Runs in the bootstrap sandbox. Constant text: all data arrives through HF_* environment variables, never by
 // interpolation. /cache holds downloaded tarballs, /work is the bundle directory.
 const char* kBootstrapScript = R"SH(
@@ -84,7 +150,7 @@ echo "userland ready" >&2
 
 // Download, verify and extract the Alpine minirootfs INSIDE a throwaway sandbox: the host only supplies the
 // curl/tar/sha256sum binaries, and the sandbox sees nothing of your files, only the two folders it writes.
-void fetch_and_extract(const Profile& p, const User& u, const Paths& paths, const fs::path& session) {
+void fetch_and_extract(const Profile& p, const User& u, const Paths& paths, const fs::path& session, const HostLibs& host) {
     std::string branch;
     if (!is_exact_alpine_release(p.alpine_version, &branch))
         throw ProfileError(cat("alpine_version '", p.alpine_version, "' must be an exact release such as 3.24.3 (data/os/", p.os, ".profile)"));
@@ -94,25 +160,33 @@ void fetch_and_extract(const Profile& p, const User& u, const Paths& paths, cons
     const std::string name = cat("alpine-minirootfs-", ver, "-", arch, ".tar.gz");
 
     ArgBuilder b;
-    b.flag("--unshare-all").flag("--unshare-user").flag("--share-net").flag("--die-with-parent");
+    install_network(b, p);
+    b.flag("--die-with-parent");
     b.raw({"--cap-drop", "ALL"}).raw({"--hostname", "holdfast-bootstrap"});
     b.raw({"--proc", "/proc"}).raw({"--dev", "/dev"}).tmpfs("/tmp");
     b.dir("/usr/bin");
     b.symlink("usr/bin", "/bin").symlink("usr/bin", "/sbin").symlink("usr/bin", "/usr/sbin");
-    bind_host_library_dirs(b, true);
-    for (const char* tool : {"sh", "curl", "tar", "gzip", "sha256sum", "cut", "chmod", "rm", "mkdir", "mv"}) {
-        auto host = which(tool);
+    bind_host_library_dirs(b, false);                              // only the usr-merge symlinks, no directories
+    const Policy pol(u, {});
+    for (const std::string& f : host.files) {                      // the [install] use libs' saved files, sorted: parents first
         std::error_code ec;
-        const fs::path real = host ? fs::canonical(*host, ec) : fs::path();
-        if (!host || ec)
-            throw Error(cat("fetching the userland needs '", tool, "' installed on the host (it runs inside a sandbox, but the binary comes from the host)"));
-        b.ro_bind(real, fs::path("/usr/bin") / tool);
-        if (real != *host) b.ro_bind_try(real, real);              // multi-call/alternatives targets that look for themselves
+        if (!fs::exists(f, ec))
+            throw Error(cat("library file listed for os '", host.os, "' no longer exists on this host: ", f,
+                            " (run `holdfast libs --check`, then `holdfast libs --refresh`)"));
+        pol.check_bind(f, false);
+        b.ro_bind(canon(f), f);
     }
-    for (const char* d : {"/etc/ld.so.cache", "/etc/ssl", "/etc/ca-certificates"})
-        if (fs::exists(d)) b.ro_bind_try(d, d);                    // CA certificates for https
-    write_file(session / "resolv.conf", pasta_resolv_conf(), 0644);   // network is pasta's private namespace
-    b.ro_bind(session / "resolv.conf", "/etc/resolv.conf");
+    for (const std::string& tool : bootstrap_tools(p)) {
+        auto hp = which(tool);
+        std::error_code ec;
+        const fs::path real = hp ? fs::canonical(*hp, ec) : fs::path();
+        if (!hp || ec)
+            throw Error(cat("fetching the userland needs '", tool, "' installed on the host (it runs inside a sandbox, but the binary comes from the host)"));
+        pol.check_bind(real, false);
+        b.ro_bind(real, fs::path("/usr/bin") / tool);
+        if (real != *hp) b.ro_bind_try(real, real);              // multi-call/alternatives targets that look for themselves
+    }
+    install_resolv(b, p, session);
     const fs::path cache = paths.cache / "alpine" / arch;
     make_private_dir(cache);
     make_private_dir(paths.bundle);
@@ -121,24 +195,24 @@ void fetch_and_extract(const Profile& p, const User& u, const Paths& paths, cons
     b.setenv("HF_BASE", cat(p.alpine_mirror, "/", branch, "/releases/", arch)).setenv("HF_NAME", name).setenv("HF_SHA", p.alpine_sha256);
     b.command({"/bin/sh", "-c", kBootstrapScript});
 
-    fs::path seccomp;
-    if (p.seccomp != "none") { seccomp = session / "seccomp.bpf"; write_default_seccomp(seccomp); }
-    log::info(cat("fetching ", name, " inside a sandbox (network via pasta)"));
-    const int rc = run_sandbox(as_user(u, pasta_argv(find_pasta(), launcher_argv(find_bwrap(), session, b, seccomp))),
-                               p.terminal == TermMode::Filter);
+    log::info(cat("fetching ", name, " into ", cache.string(), " inside a sandbox (", install_net_desc(p), ")"));
+    const int rc = run_sandbox(install_launch(p, u, session, b, install_seccomp(p, session)), p.terminal == TermMode::Filter);
     if (rc == 3) throw Error(cat("sha256 mismatch for ", name, ": the download does not match the hash in data/os/", p.os, ".profile; nothing was installed"));
+    if (rc == 6)
+        throw Error(cat("fetching the Alpine userland failed: the mirror's name did not resolve via ", install_net_desc(p),
+                        ". Check that this resolver answers, or set another with [install] dns in data/os/", p.os, ".profile"));
     if (rc != 0) throw Error(cat("fetching the Alpine userland failed (exit ", rc, "); see the messages above"));
 }
 
 ArgBuilder writable_args(const Profile& p, const Paths& paths, const fs::path& session) {
     ArgBuilder b;
-    b.flag("--unshare-all").flag("--unshare-user").flag("--share-net").flag("--die-with-parent");
+    install_network(b, p);
+    b.flag("--die-with-parent");
     b.raw({"--uid", "0", "--gid", "0"});                          // apk needs to chown as "root" (userns-mapped to you)
     b.raw({"--hostname", "holdfast-provision"});
     b.bind(paths.rootfs, "/");
     b.raw({"--proc", "/proc"}).raw({"--dev", "/dev"}).tmpfs("/tmp");
-    write_file(session / "resolv.conf", pasta_resolv_conf(), 0644);   // runs inside pasta; see launch.hpp
-    b.ro_bind(session / "resolv.conf", "/etc/resolv.conf");
+    install_resolv(b, p, session);
     make_private_dir(paths.home);
     const fs::path fh = fs::path("/home") / p.fake_user;
     b.bind(paths.home, fh);
@@ -156,10 +230,10 @@ ArgBuilder writable_args(const Profile& p, const Paths& paths, const fs::path& s
 void install_os_packages(const Profile& p, const User& u, const Paths& paths, const fs::path& session) {
     std::string script = "set -e\napk update\napk add --no-cache";
     for (auto& pk : p.apk_packages) script += " " + shell_quote(pk);
-    log::info(cat("installing the os packages with apk: writable rootfs, userns-root, network via pasta (data/os/", p.os, ".profile)"));
+    log::info(cat("installing the os packages with apk: writable rootfs, userns-root, ", install_net_desc(p), " (data/os/", p.os, ".profile)"));
     ArgBuilder b = writable_args(p, paths, session);
     b.command({"/bin/sh", "-c", script + "\n"});
-    const int rc = run_sandbox(as_user(u, pasta_argv(find_pasta(), launcher_argv(find_bwrap(), session, b, ""))), p.terminal == TermMode::Filter);
+    const int rc = run_sandbox(install_launch(p, u, session, b, install_seccomp(p, session)), p.terminal == TermMode::Filter);
     if (rc != 0) throw Error(cat("installing the os packages failed (exit ", rc, "); see the messages above and check data/os/", p.os, ".profile"));
 }
 
@@ -177,7 +251,7 @@ void install_dep(const Profile& p, const DepRecipe& d) {
     ro.yes = true;
     ro.userland_ready = true;                                      // the userland and its packages are already in place
     ro.command = {"/bin/sh", "-c", script};
-    log::info(cat("dep '", d.name, "': an ordinary run of '", p.name, "' with network=", d.net == NetMode::Pasta ? "pasta" : "none",
+    log::info(cat("dep '", d.name, "': an ordinary run of '", p.name, "' with network=", d.net == NetMode::Pasta ? cat("pasta (DNS ", p.install_dns, ")") : "none",
                   " and this recipe as the command"));
     const int rc = run_profile(dep_profile(p, d), ro);
     if (rc != 0) throw Error(cat("dep '", d.name, "' failed (exit ", rc, "); see the messages above, fix data/dep/", d.name, ".profile and run again"));
@@ -188,6 +262,7 @@ void install_dep(const Profile& p, const DepRecipe& d) {
 Profile dep_profile(const Profile& p, const DepRecipe& d) {
     Profile r = p;
     r.net = d.net;
+    r.dns = d.net == NetMode::Pasta ? p.install_dns : "";      // a dep is an install step: the os file's resolver
     r.cwd = CwdMode::None;
     r.display.reset();
     r.display_use.clear();
@@ -225,11 +300,17 @@ void bundle_ensure(const Profile& p, const User& u, const Paths& paths, bool ref
     }
     if (!rebuild && !packages_due && due.empty()) return;          // the common case: nothing to do
 
+    HostLibs host;
+    if (rebuild) { require_install_dns(p, "fetching the Alpine userland"); host = require_host_tools(p, u); }
+    if (packages_due && !p.apk_packages.empty()) require_install_dns(p, "installing the os packages (apk)");
+    for (const DepRecipe* d : due)
+        if (d->net == NetMode::Pasta) require_install_dns(p, cat("dep '", d->name, "'"));
+
     make_private_dir(paths.state);
     struct Scratch { fs::path d; ~Scratch() { std::error_code ec; fs::remove_all(d, ec); } } sc{make_session_dir(u, paths, p.name + "-setup")};
     if (rebuild) {
         log::info(installed ? "rebuilding the Alpine userland (its definition changed)" : "first run: setting up the Alpine userland");
-        fetch_and_extract(p, u, paths, sc.d);
+        fetch_and_extract(p, u, paths, sc.d, host);
         write_file(paths.bundle / "spec.stamp", bundle_spec(p) + "\n", 0600);
         std::error_code ec;
         fs::remove(paths.bundle / "packages.stamp", ec);           // a fresh rootfs has none of the packages

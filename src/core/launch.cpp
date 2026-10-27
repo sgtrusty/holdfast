@@ -29,11 +29,16 @@ fs::path find_pasta() {
 
 std::string pasta_resolv_conf() { return cat("nameserver ", kPastaDns, "\n"); }
 
-Strings pasta_argv(const fs::path& pasta, const Strings& inner) {
+Strings pasta_argv(const fs::path& pasta, const Strings& inner, const std::string& dns_host) {
     // -t/-u: no inbound port forwarding; -T/-U: sandbox cannot connect to host loopback services;
     // --no-map-gw: the gateway address does not reach the host either.
     Strings v = {pasta.string(), "--config-net", "--no-map-gw", "-t", "none", "-u", "none", "-T", "none", "-U", "none",
-                 "--dns-forward", kPastaDns, "--"};
+                 "--dns-forward", kPastaDns};
+    // Validated at parse time; checked again because this value lands on pasta's argv, and so that no caller can
+    // fall back to pasta's default upstream (the host's /etc/resolv.conf).
+    if (dns_host.empty()) throw Error("pasta needs an explicit DNS server: set [network] dns (profile) or [install] dns (data/os file)");
+    if (!is_ipv4_unicast(dns_host)) throw Error(cat("invalid DNS server '", dns_host, "': expected an IPv4 address such as 1.1.1.1"));
+    v.insert(v.end(), {"--dns-host", dns_host, "--"});
     v.insert(v.end(), inner.begin(), inner.end());
     return v;
 }

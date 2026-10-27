@@ -80,13 +80,18 @@ void mount_identity(ArgBuilder& b, const Profile& p, const PlanCtx& c) {
     b.ro_bind(c.session / "hosts", "/etc/hosts");
 }
 
-// resolv.conf: the host's, or (pasta) one that points at pasta's DNS forwarder, because a host stub
-// resolver on 127.0.0.x is not reachable from inside the private namespace.
-void bind_resolv_conf(ArgBuilder& b, const PlanCtx& c) {
+// resolv.conf is never the host's unless the profile says `dns = host` (mode host). pasta: pasta's forwarder (a host
+// stub on 127.0.0.x is unreachable from the private namespace). host: the profile's resolver. ivpn: `ip netns exec`
+// overlays /etc/resolv.conf with /etc/netns/<ns>/resolv.conf, written from the WireGuard config's DNS.
+void bind_resolv_conf(ArgBuilder& b, const Profile& p, const PlanCtx& c) {
     if (c.pasta) {
         write_file(c.session / "resolv.conf", pasta_resolv_conf(), 0644);
         b.ro_bind(c.session / "resolv.conf", "/etc/resolv.conf");
-    } else if (fs::exists("/etc/resolv.conf")) {
+    } else if (p.net == NetMode::Host && p.dns != "host") {
+        if (!is_ipv4_unicast(p.dns)) throw ProfileError(cat("profile '", p.name, "': network mode host needs dns = <IPv4> or dns = host"));
+        write_file(c.session / "resolv.conf", cat("nameserver ", p.dns, "\n"), 0644);
+        b.ro_bind(c.session / "resolv.conf", "/etc/resolv.conf");
+    } else if ((p.net == NetMode::Host || p.net == NetMode::Ivpn) && fs::exists("/etc/resolv.conf")) {   // dns = host, or the ivpn overlay
         b.ro_bind("/etc/resolv.conf", "/etc/resolv.conf");
     }
 }
@@ -156,7 +161,7 @@ void mount_host_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, const 
                               "/etc/ca-certificates", "/usr/share/ca-certificates", "/etc/pki", "/usr/share/p11-kit",
                               "/etc/os-release", "/usr/lib/os-release"})
             if (fs::exists(d)) b.ro_bind_try(d, d);
-        if (c.network) bind_resolv_conf(b, c);
+        if (c.network) bind_resolv_conf(b, p, c);
     }
 }
 
@@ -184,7 +189,7 @@ void mount_bundle_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, std:
     }
     if (c.network) {
         // resolv.conf from host (or from the ip-netns overlay when running under ivpn).
-        bind_resolv_conf(b, c);
+        bind_resolv_conf(b, p, c);
     }
 }
 
