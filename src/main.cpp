@@ -1,93 +1,80 @@
 // holdfast - sandbox launcher built on bubblewrap
+#include <algorithm>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 
+#include "cli/args.hpp"
+#include "cli/doctor.hpp"
 #include "core/bundle.hpp"
+#include "core/datadefs.hpp"
+#include "core/libs_cmd.hpp"
 #include "core/session.hpp"
 #include "util/log.hpp"
-
-#ifndef HOLDFAST_SHARE_DIR
-#define HOLDFAST_SHARE_DIR "/usr/local/share/holdfast"
-#endif
-#ifndef HOLDFAST_VERSION
-#define HOLDFAST_VERSION "0.1.0"
-#endif
+#include "util/style.hpp"
 
 using namespace hf;
-
-static void usage() {
-    std::fputs(
-R"(holdfast - bubblewrap sandbox launcher: whitelist userland, optional WireGuard netns, nested X
-
-USAGE
-  holdfast run [options] PROFILE [-- COMMAND...]   run a sandbox
-  holdfast print [options] PROFILE                 show the exact bwrap argv (no side effects)
-  holdfast check PROFILE                           validate a profile
-  holdfast bundle setup|shell|info|purge PROFILE   manage the Alpine bundle   [--force]
-  holdfast net-test PROFILE                        bring up the netns and test the kill switch
-  holdfast net-cleanup NAME                        remove a stale namespace (e.g. hf-librewolf)
-  holdfast purge PROFILE [-y]                      delete ALL state of a profile (incl. fake $HOME)
-  holdfast init [NAME]                             list/print example profiles
-  holdfast list                                    list known profiles
-  holdfast doctor                                  check host prerequisites
-
-RUN OPTIONS
-  --net=none|host|ivpn   override [network] mode      --wg=FILE      WireGuard config (ivpn)
-  --cwd=DIR              working tree to mount        --no-cwd       never mount a working tree
-  -y, --yes              don't ask before mounting    -n, --dry-run  same as `print`
-  -v, --verbose          debug output
-
-PROFILE is a name (searched in $HOLDFAST_PROFILES, ~/.config/holdfast/profiles, /etc/holdfast/profiles)
-or a path to a .profile file.
-)", stderr);
-}
 
 static Profile load(const std::string& name) {
     std::string home;
     try { home = resolve_user().home.string(); } catch (...) { if (const char* h = std::getenv("HOME")) home = h; }
-    return load_profile_file(find_profile(name, home));
+    Profile p = load_profile_file(find_profile(name, home));
+    resolve_profile_data(p, data_roots(home));       // os file / library file lists the profile refers to (fails closed)
+    return p;
 }
 
-static bool confirm(const std::string& q, bool yes) {
-    if (yes) return true;
-    std::fprintf(stderr, "%s [y/N] ", q.c_str());
-    char b[8] = {0};
-    return std::fgets(b, sizeof b, stdin) && (b[0] == 'y' || b[0] == 'Y');
-}
-
-static int cmd_init(const Strings& a) {
+// `list` shows what `run NAME` / profiles' `use` and `os` would find, in the same search order (first match wins, so a
+// user copy hides a shipped one). -v adds the file each entry came from.
+static int cmd_list(const Strings& a, bool verbose) {
     namespace fs = std::filesystem;
-    Strings dirs;
-    if (const char* e = std::getenv("HOLDFAST_SHARE")) dirs.push_back(std::string(e) + "/profiles");
-    dirs.push_back(std::string(HOLDFAST_SHARE_DIR) + "/profiles");
-    for (auto& d : dirs) {
-        if (!fs::is_directory(d)) continue;
-        if (a.empty()) {
-            for (auto& e : fs::directory_iterator(d)) if (e.path().extension() == ".profile") std::printf("%s\n", e.path().stem().string().c_str());
-            return 0;
+    std::string home;
+    try { home = resolve_user().home.string(); } catch (...) {}
+    const Strings roots = data_roots(home);
+    if (a.size() > 1 || (!a.empty() && a[0] != "libs" && a[0] != "os" && a[0] != "deps" && a[0] != "displays")) throw Error("usage: holdfast list [libs|os|deps|displays] [-v]");
+    // Piped output stays plain, headerless and one entry per line; on a terminal there is a header and colour.
+    const Style st = style_for(stdout);
+    bool header_done = false;
+    auto line = [&](const std::string& name, const char* kind, const std::string& desc, const fs::path& file) {
+        if (st.tty && !header_done) {
+            header_done = true;
+            std::printf("%s%-20s %-7s %s%s\n", st.b, "NAME", "KIND", "DESCRIPTION", st.r);
         }
-        fs::path f = fs::path(d) / (a[0] + ".profile");
-        if (fs::is_regular_file(f)) { std::fputs(read_file(f).c_str(), stdout); return 0; }
+        const bool invalid = std::string(kind) == "INVALID";
+        std::printf("%-20s %s%-7s%s %s", name.c_str(), invalid ? st.x : "", kind, invalid ? st.r : "", desc.c_str());
+        if (verbose) std::printf("  %s[%s]%s", st.c, file.c_str(), st.r);
+        std::printf("\n");
+    };
+    if (!a.empty()) {
+        const std::string which = a[0];
+        for (const auto& n : list_data(roots, which == "libs" ? "lib" : which == "deps" ? "dep" : which == "displays" ? "display" : "os")) {
+            try {
+                if (which == "libs") { LibDef d = load_lib(n, roots); line(n, "lib", d.description, d.file); }
+                else if (which == "deps") { DepRecipe d = load_dep(n, roots); line(n, "dep", d.description, find_data(roots, "dep", n).value_or("")); }
+                else if (which == "displays") { DisplayDef d = load_display(n, roots); line(n, d.mode == DisplayMode::Nested ? "xephyr" : "host", d.description, find_data(roots, "display", n).value_or("")); }
+                else { OsDef o = load_os(n, roots); line(n, o.kind == OsKind::Host ? "host" : "bundle", o.description, o.file); }
+            } catch (const Error& ex) { line(n, "INVALID", ex.what(), ""); }
+        }
+        return 0;
     }
-    log::error("example profiles not found (set HOLDFAST_SHARE or install the share/ directory)");
-    return 1;
-}
-
-static int cmd_list() {
-    namespace fs = std::filesystem;
     Strings dirs;
     if (const char* e = std::getenv("HOLDFAST_PROFILES")) dirs.push_back(e);
-    try { dirs.push_back((resolve_user().home / ".config/holdfast/profiles").string()); } catch (...) {}
+    if (!home.empty()) dirs.push_back(home + "/.config/holdfast/profiles");
     dirs.push_back("/etc/holdfast/profiles");
+    for (const auto& r : roots) dirs.push_back(r + "/profile");
+    std::set<std::string> seen;
     for (auto& d : dirs) {
-        if (!fs::is_directory(d)) continue;
-        for (auto& e : fs::directory_iterator(d)) {
-            if (e.path().extension() != ".profile") continue;
+        std::error_code ec;
+        if (!fs::is_directory(d, ec)) continue;
+        std::vector<fs::path> files;
+        for (auto& e : fs::directory_iterator(d, ec)) if (e.path().extension() == ".profile") files.push_back(e.path());
+        std::sort(files.begin(), files.end());
+        for (const auto& f : files) {
+            if (!seen.insert(f.stem().string()).second) continue;          // shadowed by an earlier directory
             try {
-                Profile p = load_profile_file(e.path());
-                std::printf("%-20s %-7s %s\n", p.name.c_str(), p.root == RootMode::Host ? "host" : "bundle", p.description.c_str());
-            } catch (const Error& ex) { std::printf("%-20s INVALID  %s\n", e.path().stem().string().c_str(), ex.what()); }
+                Profile p = load_profile_file(f);
+                line(p.name, p.root == RootMode::Host ? "host" : "bundle", p.description, f);
+            } catch (const Error& ex) { line(f.stem().string(), "INVALID", ex.what(), f); }
         }
     }
     return 0;
@@ -96,71 +83,32 @@ static int cmd_list() {
 int main(int argc, char** argv) {
     std::signal(SIGPIPE, SIG_IGN);
     Strings args(argv + 1, argv + argc);
-    if (args.empty() || args[0] == "-h" || args[0] == "--help" || args[0] == "help") { usage(); return args.empty() ? 2 : 0; }
-    if (args[0] == "--version" || args[0] == "version") { std::printf("holdfast %s\n", HOLDFAST_VERSION); return 0; }
+    if (auto rc = handle_meta(args)) return *rc;       // no arguments, help, version (src/cli/args.cpp)
 
     const std::string cmd = args[0];
     args.erase(args.begin());
 
     try {
         if (cmd == "doctor") return doctor();
-        if (cmd == "init") return cmd_init(args);
-        if (cmd == "list") return cmd_list();
 
-        // generic option scan (stops at `--`)
-        RunOptions o;
-        std::string sub;
-        bool force = false, yes = false;
-        Strings pos;
-        size_t i = 0;
-        for (; i < args.size(); ++i) {
-            const std::string& a = args[i];
-            if (a == "--") { ++i; break; }
-            if (a == "-v" || a == "--verbose") log::set_verbose(true);
-            else if (a == "-y" || a == "--yes") { o.yes = true; yes = true; }
-            else if (a == "-n" || a == "--dry-run") o.dry = true;
-            else if (a == "--no-cwd") o.no_cwd = true;
-            else if (a == "--force") force = true;
-            else if (a.rfind("--net=", 0) == 0) {
-                std::string m = a.substr(6);
-                if (m == "none") o.net = NetMode::None; else if (m == "host") o.net = NetMode::Host; else if (m == "ivpn") o.net = NetMode::Ivpn;
-                else throw Error("--net expects none|host|ivpn");
-            }
-            else if (a.rfind("--wg=", 0) == 0) o.wg_conf = a.substr(5);
-            else if (a.rfind("--cwd=", 0) == 0) o.cwd = a.substr(6);
-            else if (!a.empty() && a[0] == '-') throw Error("unknown option: " + a);
-            else pos.push_back(a);
+        Cli cli = parse_args(cmd, args);                // options, positionals, and everything after `--`
+        if (cli.verbose) log::set_verbose(true);
+        RunOptions& o = cli.run;
+        const Strings& pos = cli.pos;
+
+        if (o.debug && cmd != "run" && cmd != "print") throw Error("--debug applies to `run` (open a shell in the sandbox) and `print` (show how)");
+
+        if (cmd == "list") return cmd_list(pos, cli.verbose);
+
+        if (cmd == "libs") {
+            if (pos.size() > 1 || (cli.check && cli.refresh)) throw Error("usage: holdfast libs [--check|--refresh] [OS]");
+            return cmd_libs(pos.empty() ? "" : pos[0], cli.check, cli.refresh);
         }
-        for (; i < args.size(); ++i) o.command.push_back(args[i]);
-
         if (cmd == "net-cleanup") {
             if (pos.size() != 1) throw Error("usage: holdfast net-cleanup NAME");
             net_cleanup(pos[0]);
             return 0;
         }
-        if (cmd == "bundle") {
-            if (pos.size() != 2) throw Error("usage: holdfast bundle setup|shell|info|purge PROFILE");
-            sub = pos[0];
-            Profile p = load(pos[1]);
-            User u = resolve_user();
-            Paths paths = make_paths(u, p.name);
-            if (p.root != RootMode::Bundle) throw Error("profile '" + p.name + "' is not a bundle profile ([profile] mode = bundle)");
-            if (sub == "info") {
-                std::printf("profile:     %s\nrootfs:      %s\ninstalled:   %s\nprovisioned: %s\nhome:        %s\n", p.name.c_str(),
-                            paths.rootfs.c_str(), bundle_installed(paths) ? "yes" : "no", bundle_provisioned(p, paths) ? "yes" : "no", paths.home.c_str());
-                return 0;
-            }
-            if (sub == "purge") {
-                if (!confirm("Remove the bundle userland of '" + p.name + "' (fake $HOME is kept)?", yes)) return 1;
-                bundle_purge(paths, false);
-                return 0;
-            }
-            struct Tmp { fs::path d; ~Tmp() { std::error_code ec; fs::remove_all(d, ec); } } t{make_session_dir(u, paths, p.name)};
-            if (sub == "setup") { bundle_setup(p, u, paths, t.d, force); return 0; }
-            if (sub == "shell") return bundle_shell(p, u, paths, t.d);
-            throw Error("unknown bundle subcommand: " + sub);
-        }
-
         if (pos.size() != 1) throw Error("expected exactly one PROFILE (see --help)");
         Profile p = load(pos[0]);
 
@@ -170,22 +118,16 @@ int main(int argc, char** argv) {
             validate_profile(p, true);
             o.dry = true; o.yes = true; o.command = o.command.empty() ? Strings{} : o.command;
             if (p.command.empty()) o.command = {"true"};
-            if (p.root == RootMode::Bundle) std::fprintf(stderr, "bundle: %s\n", "not inspected by check (see `bundle info`)");
-            if (p.root == RootMode::Host || fs::exists(make_paths(resolve_user(), p.name).rootfs)) {
+            if (p.root == RootMode::Bundle && !fs::exists(make_paths(resolve_user(), p.name, p.bundle_id).rootfs))
+                std::fprintf(stderr, "note: the Alpine userland is not set up yet; it is created the first time you run this profile\n");
+            else
                 run_profile(p, o);
-            }
-            std::fprintf(stderr, "profile '%s' OK\n", p.name.c_str());
+            const Style st = style_for(stderr);
+            std::fprintf(stderr, "profile '%s' %sOK%s\n", p.name.c_str(), st.g, st.r);
             return 0;
         }
         if (cmd == "net-test") return net_test(p, o);
-        if (cmd == "purge") {
-            User u = resolve_user();
-            Paths paths = make_paths(u, p.name);
-            if (!confirm("DELETE all state of '" + p.name + "' including its persistent fake $HOME at " + paths.state.string() + "?", yes)) return 1;
-            bundle_purge(paths, true);
-            return 0;
-        }
-        throw Error("unknown command: " + cmd + " (see --help)");
+        throw Error("unknown command: " + cmd + " (see holdfast help)");
     } catch (const PolicyError& e) {
         log::error(std::string("policy: ") + e.what());
         return 3;

@@ -3,15 +3,9 @@
 #include "core/argbuilder.hpp"
 #include "core/paths.hpp"
 #include "core/profile.hpp"
+#include "protocol/display/display.hpp"
 
 namespace hf {
-
-struct DisplayInfo {
-    std::string display;   // ":90"
-    fs::path socket;       // /tmp/.X11-unix/X90
-    fs::path authfile;     // MIT-MAGIC-COOKIE file (may be empty)
-    bool host = false;
-};
 
 struct PlanCtx {
     User user;
@@ -20,10 +14,12 @@ struct PlanCtx {
     fs::path session;                 // per-run private dir (0700)
     fs::path cwd;                     // resolved working tree
     bool mount_cwd = false;
-    std::optional<DisplayInfo> display;
+    std::optional<hf::display::Setup> display;   // what the display backend gives the sandbox (X11, Wayland, ...); none = no display
     Strings command_override;
     bool userns_disable_supported = false;
     bool network = false;             // sandbox shares a (possibly netns-restricted) network
+    bool pty_proxy = false;           // the terminal is proxied through a pty: bwrap must NOT also setsid (--new-session)
+    bool pasta = false;               // that network is a pasta namespace (own resolv.conf, uid mapping)
 };
 
 struct Plan {
@@ -33,6 +29,10 @@ struct Plan {
 
 Plan build_plan(const Profile& p, const PlanCtx& c);
 
+// The usr-merge symlinks (/lib, /lib64) every ELF's loader path goes through, and with `whole` also the host's
+// /usr/lib, /usr/lib64 (and real /lib dirs) read-only. Shared by `libs = full` profiles and the bundle bootstrap sandbox.
+void bind_host_library_dirs(ArgBuilder& b, bool whole);
+
 // Every `.git` (directory OR file, as in worktrees/submodules) below root.
 // Does not descend into matches.
 std::vector<fs::path> find_git_entries(const fs::path& root, size_t cap = 100000);
@@ -40,8 +40,5 @@ std::vector<fs::path> find_git_entries(const fs::path& root, size_t cap = 100000
 // DejaVu/Liberation-style font subsetting: returns matching font files.
 Strings match_font_files(const fs::path& fonts_root, const Strings& families, size_t cap = 600);
 
-// X11 MIT-MAGIC-COOKIE-1 authority file with a FamilyWild entry, so it matches
-// regardless of the sandbox's (unshared) hostname.
-void write_xauth(const fs::path& file, const std::string& display_num, const std::string& cookie16);
 
 }  // namespace hf

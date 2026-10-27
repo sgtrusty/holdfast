@@ -1,14 +1,18 @@
 #include "core/session.hpp"
 
+#include <set>
 #include <unistd.h>
 
 #include <cstdio>
 #include <regex>
 
 #include "core/bundle.hpp"
+#include "core/datadefs.hpp"
 #include "core/launch.hpp"
+#include "core/seccomp.hpp"
 #include "net/netns.hpp"
-#include "ui/display.hpp"
+#include "protocol/display/display.hpp"
+#include "ui/clipboard.hpp"
 #include "util/log.hpp"
 
 namespace hf {
@@ -44,7 +48,7 @@ struct Prepared {
 Prepared prepare(const Profile& p) {
     Prepared r;
     r.user = resolve_user();
-    r.paths = make_paths(r.user, p.name);
+    r.paths = make_paths(r.user, p.name, p.bundle_id);
     r.policy = std::make_unique<Policy>(r.user, expanded_denies(p));
     r.bwrap = find_bwrap();
     r.ver = bwrap_version(r.bwrap);
@@ -54,7 +58,12 @@ Prepared prepare(const Profile& p) {
 NetnsConfig netns_cfg(const Profile& p, const Prepared& pr, const fs::path& session, const VarCtx& vc) {
     NetnsConfig c;
     c.ns_name = p.ns_name.empty() ? derive_ns_name(p.name) : p.ns_name;
-    c.wg_conf = expand(p.wg_conf, vc);
+    const std::string conf = expand(p.wg_conf, vc);
+    std::error_code ec;
+    if (!fs::is_regular_file(conf, ec))
+        throw Error(cat("WireGuard config not found: ", conf, "\n  Download one from your VPN provider (IVPN: https://www.ivpn.net/setup/wireguard/) and save it there, "
+                        "or point at it with --wg=FILE (or [network] wg_conf).\n  It needs exactly one Endpoint, as an IPv4 literal, and no PostUp/PreUp hooks."));
+    c.wg_conf = conf;
     c.session_dir = session;
     c.lock_dir = pr.paths.run_root;
     c.octet = p.subnet_octet;
@@ -76,30 +85,43 @@ void validate_profile(const Profile& p, bool has_cmd) {
     if (p.clipboard_out && !fs::path(p.clipboard_path).is_absolute()) throw ProfileError("[clipboard] path must be absolute");
     if (p.root == RootMode::Host) {
         if (p.bins.empty()) log::warn("host mode with an empty [bin] allow list: nothing will be runnable");
-        if (!p.wm.empty()) {
-            bool sh = false;
-            for (auto& b : p.bins) if (b == "sh" || b.rfind("sh=", 0) == 0) sh = true;
-            if (!sh) throw ProfileError("[display] wm needs 'sh' in [bin] allow");
-        }
-    } else if (!p.bins.empty()) {
-        log::warn("[bin] is ignored in bundle mode (the bundle is the whole userland)");
+    } else {
+        if (!p.bins.empty()) log::warn("[bin] is ignored in bundle mode (the bundle is the whole userland)");
+        if (p.bundle_id.empty()) throw ProfileError("bundle profile without a resolved os: set [profile] os = NAME (data/os/NAME.os, kind = bundle)");
     }
     if (p.net == NetMode::Ivpn && p.wg_conf.empty()) throw ProfileError("[network] mode=ivpn needs wg_conf = /path/to/wireguard.conf");
-    if (p.display == DisplayMode::None && !p.wm.empty())
-        log::warn("[display] wm is set but display mode is none; it will be ignored by the X server (none)");
-    if (p.display == DisplayMode::None && p.audio) log::warn("audio without display: allowed, but unusual");
+    display::validate(p);                              // consent for host displays, X11-only keys, unimplemented combinations
+    if (!p.display && p.audio) log::warn("audio without display: allowed, but unusual");
 }
 
-int run_profile(Profile p, const RunOptions& o) {
+Strings debug_shell(const Profile& p) {
+    if (p.root == RootMode::Bundle)   // constant script, nothing interpolated
+        return {"/bin/sh", "-c", "if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi"};
+    auto allowed = [&](const std::string& n) {
+        for (const auto& t : p.bins) if (t.substr(0, t.find('=')) == n) return true;
+        return false;
+    };
+    if (allowed("bash")) return {"bash"};
+    if (allowed("sh")) return {"sh"};
+    throw Error(cat("--debug needs a shell inside the sandbox: add 'bash' (or 'sh') to [bin] allow of profile '", p.name,
+                    "' (and, with libs = minimal, a [libs] use that provides it)"));
+}
+
+int run_profile(Profile p, RunOptions o) {
     if (o.net) p.net = *o.net;
     if (o.wg_conf) p.wg_conf = *o.wg_conf;
+    if (o.debug) {
+        if (!o.command.empty()) throw Error("--debug replaces the command with a shell; drop the words after `--`");
+        o.command = debug_shell(p);
+        p.env_set.emplace_back("PS1", cat("(holdfast:", p.name, ") \\w\\$ "));   // so you can tell which sandbox you are in
+        log::info(cat("debug: running ", o.command[0] == "/bin/sh" ? "bash (or sh)" : o.command[0], " in the sandbox of '", p.name,
+                      "' instead of its command; everything else is exactly what the profile gets"));
+    }
     validate_profile(p, !o.command.empty());
     Prepared pr = prepare(p);
 
-    if (p.root == RootMode::Bundle) {
-        if (!bundle_installed(pr.paths)) throw Error("bundle not installed; run: holdfast bundle setup " + p.name);
-        if (!bundle_provisioned(p, pr.paths)) log::warn("profile changed since the bundle was provisioned; run: holdfast bundle setup " + p.name);
-    }
+    if (p.root == RootMode::Bundle && !o.userland_ready)
+        bundle_ensure(p, pr.user, pr.paths, o.refresh, o.dry);   // first run builds it, in sandboxes
 
     // -- working tree ------------------------------------------------------------
     CwdMode cm = o.no_cwd ? CwdMode::None : (o.yes || o.cwd ? CwdMode::Yes : p.cwd);
@@ -121,9 +143,13 @@ int run_profile(Profile p, const RunOptions& o) {
     c.cwd = cwd; c.mount_cwd = mount_cwd; c.command_override = o.command;
     c.userns_disable_supported = pr.ver.at_least(0, 8, 0);
     c.network = p.net != NetMode::None;
+    c.pasta = p.net == NetMode::Pasta;
+    c.pty_proxy = p.terminal == TermMode::Filter && terminal_proxy_possible();
+    fs::path pasta;
+    if (c.pasta && !o.dry) pasta = find_pasta();
 
     std::unique_ptr<NetNs> ns;
-    std::unique_ptr<XephyrServer> xs;
+    std::unique_ptr<display::Backend> disp;
     std::unique_ptr<ClipboardBridge> cb;
 
     if (p.net == NetMode::Ivpn) {
@@ -137,12 +163,8 @@ int run_profile(Profile p, const RunOptions& o) {
             ns->up();
         }
     }
-    if (p.display == DisplayMode::Xephyr) {
-        if (o.dry) { DisplayInfo d; d.display = ":90"; d.socket = "/tmp/.X11-unix/X90"; c.display = d; }
-        else { xs = XephyrServer::start(pr.user, p, sd.path); c.display = xs->info(); }
-    } else if (p.display == DisplayMode::Host) {
-        c.display = o.dry ? DisplayInfo{":0", "/tmp/.X11-unix/X0", "", true} : host_x11(pr.user, p);
-    }
+    disp = display::open(p, pr.user, sd.path, o.dry);   // nullptr without a display; X11 and Wayland differ only inside protocol/display
+    if (disp) c.display = disp->setup();
 
     Plan plan = build_plan(p, c);
 
@@ -150,15 +172,16 @@ int run_profile(Profile p, const RunOptions& o) {
         std::printf("%s\n", plan.b.pretty().c_str());
         return 0;
     }
-    if (p.clipboard_out) cb = std::make_unique<ClipboardBridge>(pr.user, sd.path / "clip");
+    if (p.clipboard_out) cb = std::make_unique<ClipboardBridge>(pr.user, sd.path / "clip", p.clipboard_sanitize);
 
     Strings launch = launcher_argv(pr.bwrap, sd.path, plan.b, plan.seccomp);
-    Strings full = ns ? ns->wrap(launch) : as_user(pr.user, launch);
+    if (c.pasta) launch = pasta_argv(pasta, launch);
+    Strings full = ns ? ns->wrap(launch, c.pty_proxy) : as_user(pr.user, launch);
     log::info(cat("starting '", p.name, "' (", p.root == RootMode::Host ? "host-whitelist" : "bundle", " userland, net=",
-                  p.net == NetMode::None ? "none" : p.net == NetMode::Host ? "host" : "ivpn", ")"));
-    int rc = run_with_signals(full);
-    log::info(cat("sandbox exited with code ", rc));
-    return rc;    // destructors: clipboard -> Xephyr -> netns (rules, veth, namespace) -> session dir
+                  p.net == NetMode::None ? "none" : p.net == NetMode::Host ? "host" : p.net == NetMode::Pasta ? "pasta" : "ivpn", ")"));
+    int rc = run_sandbox(full, p.terminal == TermMode::Filter, ns && c.pty_proxy);
+    if (rc != 0) log::info(cat("sandbox exited with code ", rc));
+    return rc;    // destructors: clipboard -> display backend (e.g. Xephyr) -> netns (rules, veth, namespace) -> session dir
 }
 
 int net_test(Profile p, const RunOptions& o) {
@@ -179,34 +202,6 @@ void net_cleanup(const std::string& ns_name) {
     User u = resolve_user();
     Paths p = make_paths(u, "x");
     NetNs::cleanup_stale(u, ns_name, p.run_root);
-}
-
-int doctor() {
-    int bad = 0;
-    auto row = [&](const std::string& what, bool ok, const std::string& hint, bool required) {
-        std::fprintf(stderr, "  [%s] %-28s %s\n", ok ? " ok " : (required ? "FAIL" : "warn"), what.c_str(), ok ? "" : hint.c_str());
-        if (!ok && required) ++bad;
-    };
-    std::fprintf(stderr, "core:\n");
-    auto bw = which("bwrap");
-    row("bwrap", bw.has_value(), "apt install bubblewrap", true);
-    if (bw) {
-        auto v = bwrap_version(*bw);
-        row("bwrap >= 0.8 (--disable-userns)", v.at_least(0, 8, 0), "older bwrap works; nested userns not blocked", false);
-        auto r = run({bw->string(), "--unshare-user", "--ro-bind", "/", "/", "true"}, true);
-        row("unprivileged user namespaces", r.ok(),
-            "kernel/AppArmor blocks them (Ubuntu 24.04: kernel.apparmor_restrict_unprivileged_userns=0 or an AppArmor profile for bwrap)", true);
-    }
-    row("setpriv", which("setpriv").has_value(), "util-linux", false);
-    std::fprintf(stderr, "bundle mode:\n");
-    for (auto t : {"curl", "tar", "sha256sum"}) row(t, which(t).has_value(), "required for `bundle setup`", false);
-    std::fprintf(stderr, "ivpn mode:\n");
-    for (auto t : {"ip", "iptables", "wg-quick", "wg", "ping", "sudo"}) row(t, which(t).has_value(), "required for [network] mode=ivpn", false);
-    row("ip6tables", which("ip6tables").has_value(), "recommended (IPv6 defence in depth)", false);
-    std::fprintf(stderr, "display / extras:\n");
-    row("Xephyr", which("Xephyr").has_value(), "xserver-xephyr, for [display] mode=xephyr", false);
-    row("xclip or wl-copy", which("xclip").has_value() || which("wl-copy").has_value(), "for [clipboard] mode=out", false);
-    return bad ? 1 : 0;
 }
 
 }  // namespace hf

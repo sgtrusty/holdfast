@@ -24,6 +24,7 @@ struct RunOpts {
     std::string stdin_data;
     bool capture = false;  // capture stdout
     bool quiet = false;    // silence stdin/stdout/stderr (except captured stdout)
+    bool merge_stderr = false;   // with capture: stderr goes into the captured text (diagnostics) instead of /dev/null
 };
 struct RunResult {
     int code = -1;
@@ -32,6 +33,7 @@ struct RunResult {
 };
 RunResult run(const RunOpts& o);
 RunResult run(const Strings& argv, bool quiet = false);
+RunResult capture_all(const Strings& argv);     // stdout AND stderr, for diagnostics
 RunResult capture(const Strings& argv);  // stdout captured, stderr silenced
 
 pid_t spawn(const Strings& argv, bool quiet);  // background; caller must wait_child()
@@ -42,6 +44,11 @@ bool child_alive(pid_t pid);                    // non-blocking probe (does not 
 bool is_root();
 Strings as_root(Strings argv);                  // prefix with sudo unless root
 Strings as_user(const User& u, Strings argv);   // setpriv drop when root
+// Makes sure sudo works for the rest of this run (one password prompt at most) and keeps the ticket fresh in the
+// background, because cleanup at exit needs it. If holdfast had to ask for the password, sudo_keepalive_stop() REVOKES
+// the ticket again (`sudo -k`) so nothing else of yours can use it after holdfast is done. A ticket you already had
+// before running holdfast is never touched. No-op as root.
+void sudo_acquire();
 void sudo_keepalive_start();                    // refresh sudo ticket in background
 void sudo_keepalive_stop();
 
@@ -50,6 +57,9 @@ std::optional<fs::path> which(const std::string& name, const std::string& path_e
 std::string read_file(const fs::path& p, size_t max_bytes = 1u << 20);
 void write_file(const fs::path& p, const std::string& data, mode_t mode = 0600);
 void make_private_dir(const fs::path& p);       // mkdir -p, 0700 on created leaves
+// Like make_private_dir, but for dirs holding launcher input (bwrap.args): the leaf must be a real
+// directory (not a symlink) owned by us / the sudo user, and is forced to 0700, else throws.
+void make_secure_dir(const fs::path& p);
 std::string sha256_file(const fs::path& p);     // via sha256sum
 std::string sha256_str(const std::string& s);
 

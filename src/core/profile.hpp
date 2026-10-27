@@ -7,8 +7,11 @@
 namespace hf {
 
 enum class RootMode { Host, Bundle };
-enum class NetMode { None, Host, Ivpn };
-enum class DisplayMode { None, Host, Xephyr };
+enum class NetMode { None, Host, Pasta, Ivpn };
+enum class LibsMode { Minimal, Full };
+enum class TermMode { Filter, Passthrough };
+enum class DisplayProtocol { X11, Wayland };       // which display protocol the sandboxed program speaks
+enum class DisplayMode { Host, Nested };           // the host's display server (explicit opt-in) | a private one (X11: Xephyr)
 enum class CwdMode { None, Ask, Yes };
 
 struct MountSpec {
@@ -18,15 +21,40 @@ struct MountSpec {
     bool optional = false; // skip silently when src is missing
 };
 
+// data/dep/NAME.profile: one install step for a bundle profile (a tool built or fetched into the profile's $HOME).
+// It runs as an ordinary run of the profile that uses it; everything it needs differently is declared here.
+struct DepRecipe {
+    std::string name, description;
+    std::string os;                // the userland it is built for; the using profile must name the same os
+    NetMode net = NetMode::None;   // [network] mode: none (default) or pasta
+    Strings needs;                 // commands that must already exist in the userland (its packages come from data/os)
+    Strings run;                   // shell lines, run once with the profile's identity and $HOME
+    std::string digest;            // hash of os+net+needs+run: a changed recipe is detected, never silently re-run
+};
+
+// data/display/NAME.profile: what a display IS. A sandbox profile only says `[display] use = NAME`; X11 specifics (Xephyr, its
+// size and cookie, the window manager) and Wayland specifics live here, so the sandbox profile does not care which protocol it gets.
+struct DisplayDef {
+    std::string name, description;
+    DisplayProtocol protocol = DisplayProtocol::X11;
+    DisplayMode mode = DisplayMode::Nested;
+    // x11 + nested only (the parser rejects them elsewhere): Wayland has no server/window-manager split and no cookie file.
+    std::string size = "1280x800";
+    bool xauth = true;
+    std::string wm;                // shell snippet started in the sandbox before the program; X needs a separate window manager
+};
+
 struct Profile {
     // [profile]
     std::string name, description;
     RootMode root = RootMode::Host;
     Strings command;
     std::string hostname = "holdfast";
-    bool new_session = true;
+    bool new_session = true;       // only used when the terminal is not proxied (see `terminal`)
+    TermMode terminal = TermMode::Filter;   // pty proxy that strips dangerous escape sequences
     bool disable_userns = true;
-    std::string seccomp;           // optional compiled BPF file
+    std::string os;                // data/os/NAME.os: bundle profiles (required) name their shared userland; host profiles may pin a lock
+    std::string seccomp = "default";   // "default" (built-in filter) | "none" | path to a compiled BPF file
     CwdMode cwd = CwdMode::Ask;
     std::string cwd_dest = "/shared";
 
@@ -35,8 +63,10 @@ struct Profile {
 
     // [fs]
     bool fs_defaults = true;
-    bool libs = true;
+    LibsMode libs = LibsMode::Minimal;
     std::vector<MountSpec> mounts;
+    Strings lib_use;               // [libs] use: data/lib/*.lib names this profile needs (libs = minimal)
+    Strings lib_binds;             // NOT parsed: filled by resolve_profile_data() from lib_use + the OS lock
     Strings tmpfs;
     Strings extra_deny;
 
@@ -56,25 +86,29 @@ struct Profile {
     int subnet_octet = 0;          // 0 => derived from ns name
 
     // [display]
-    DisplayMode display = DisplayMode::None;
-    std::string display_size = "1280x800";
-    std::string wm;                // shell snippet started before the command
-    bool allow_host_x11 = false;
-    bool xauth = true;
+    std::string display_use;       // [display] use = NAME: a data/display profile; empty = no display
+    bool allow_host_display = false;   // [display] allow_host: consent when that display is mode = host (it hands over your real session)
+    std::optional<DisplayDef> display;   // NOT parsed: resolve_profile_data() fills it from display_use
 
     // [audio] [clipboard] [git] [fonts]
     bool audio = false;
     bool clipboard_out = false;
+    bool clipboard_sanitize = true;   // strip control chars before the text reaches the host clipboard
     std::string clipboard_path = "/tmp/clip_pipe";
     bool git_protect = true;
     Strings font_families;
 
-    // [bundle]
-    std::string alpine_version = "latest-stable";
+    // [deps] use: the data/dep recipes installed into this profile's persistent $HOME (bundle mode only).
+    Strings dep_use;
+
+    // Everything below is NOT parsed from the profile: resolve_profile_data() fills it from the profile's data/os file
+    // (bundle kind) and its data/dep recipes, so one OS setup and each install step are declared exactly once.
+    std::string bundle_id;         // = the os name; every profile naming the same os shares one userland
+    std::string alpine_version;
     std::string alpine_mirror = "https://dl-cdn.alpinelinux.org/alpine";
     std::string alpine_sha256;     // optional pin of the minirootfs tarball
     Strings apk_packages;
-    Strings provision;             // shell lines run once inside the bundle (with network)
+    std::vector<DepRecipe> deps;   // in `use` order
 };
 
 Profile parse_profile(const std::string& text, const std::string& origin);

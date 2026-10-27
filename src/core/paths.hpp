@@ -9,15 +9,18 @@ namespace hf {
 
 // Persistent layout (all under the target user's data dir, never system-wide):
 //   <data>/cache/alpine/<arch>/...      downloaded minirootfs tarballs
-//   <data>/profiles/<name>/rootfs       bundle userland (bundle mode)
-//   <data>/profiles/<name>/home         persistent fake $HOME
-//   <data>/profiles/<name>/provision.stamp
+//   <data>/bundles/<id>/rootfs          bundle userland, shared by every profile with `[profile] os = <id>`
+//   <data>/bundles/<id>/spec.stamp      hash of version|mirror|sha256 the rootfs was built from
+//   <data>/bundles/<id>/tarball.sha256  sha256 of the verified minirootfs tarball
+//   <data>/profiles/<name>/home         persistent fake $HOME (never shared)
+//   <data>/profiles/<name>/deps/<dep>.stamp   one per installed data/dep recipe
 // Ephemeral per-run:
 //   <runtime>/holdfast/<name>.<pid>/    passwd, group, hosts, fonts.conf, args, xauth, clip
 struct Paths {
-    fs::path data, cache, state, rootfs, home, run_root;
+    fs::path data, cache, state, bundle, rootfs, home, run_root;
 };
-Paths make_paths(const User& u, const std::string& profile_name);
+// bundle_id empty => the profile name (an unshared bundle).
+Paths make_paths(const User& u, const std::string& profile_name, const std::string& bundle_id = "");
 fs::path make_session_dir(const User& u, const Paths& p, const std::string& profile_name);
 
 // $VAR expansion. Unknown variables are an error (fail closed).

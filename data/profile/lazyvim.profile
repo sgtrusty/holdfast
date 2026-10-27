@@ -2,7 +2,7 @@
 # Replaces: lvim
 #
 #   cd ~/Projects/foo && holdfast run lazyvim          # offline editing
-#   holdfast run --net=host lazyvim                     # "sync" mode: plugins/LSP downloads
+#   holdfast run --net=pasta lazyvim                    # "sync" mode: plugins/LSP downloads (private netns via pasta)
 #
 # The working tree is mounted read-write at /shared, but every .git inside it is
 # re-bound READ-ONLY: the editor (or an agent inside it) can change files, not history/hooks.
@@ -26,6 +26,9 @@ allow = gcc cc g++ ld as ar pkg-config lld rustc cargo
 # allow = steam=/usr/bin/steam
 
 [fs]
+# gcc/rustc/cargo link against the host's crt files, libc.so and static archives, which `libs = minimal`
+# (the default) does not mount. Treesitter/Mason builds need them, so this profile opts out.
+libs = full
 # Read-only runtime bits. ro_try silently skips what your distro doesn't have.
 ro_try = /usr/share/nvim
 ro_try = /usr/include
@@ -52,7 +55,7 @@ pass = EDITOR_MODE
 unset = DBUS_SESSION_BUS_ADDRESS
 
 [network]
-mode = none                   # override per run with --net=host
+mode = none                   # override per run with --net=pasta (preferred over host)
 
 [display]
 mode = none

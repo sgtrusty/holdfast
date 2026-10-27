@@ -16,7 +16,26 @@ BwrapVersion bwrap_version(const fs::path& bwrap);
 // interpolated into shell text.
 Strings launcher_argv(const fs::path& bwrap, const fs::path& session, const ArgBuilder& b, const fs::path& seccomp);
 
+// pasta (from the passt package) gives the sandbox a *private* network namespace with outbound
+// connectivity. Unlike net=host this does not share the host's abstract unix sockets (X11, D-Bus), and
+// with the options below the sandbox cannot reach host loopback services or forward ports in either direction.
+fs::path find_pasta();                       // throws if missing
+inline constexpr const char* kPastaDns = "192.0.2.53";   // RFC 5737 TEST-NET-1: intercepted by pasta --dns-forward
+std::string pasta_resolv_conf();             // /etc/resolv.conf for the sandbox
+Strings pasta_argv(const fs::path& pasta, const Strings& inner);
+
 // Runs argv in the foreground, forwarding SIGTERM/SIGHUP, returns the exit code.
 int run_with_signals(const Strings& argv);
+
+// Like run_with_signals, but when `filter` is set and stdin+stdout are terminals the program runs on a
+// fresh pty that is its controlling terminal, and everything it prints passes through TermFilter before it
+// reaches your real terminal (no clipboard writes, no fake titles/links, no reply-injection, modes restored
+// on exit). Because the sandbox's tty is the pty, TIOCSTI can only type into the sandbox itself, so no
+// `--new-session` (and none of its Ctrl-C/job-control/ /dev/tty side effects) is needed.
+// `wrapper_makes_ctty`: argv starts with a privileged wrapper (sudo ...) that must keep seeing YOUR terminal session,
+// because sudo's ticket is tied to it: a new session here would make sudo ask for the password a second time. The
+// pty then becomes the controlling terminal further in (`setsid -w -c`, see NetNs::wrap) instead of in this child.
+bool terminal_proxy_possible();
+int run_sandbox(const Strings& argv, bool filter, bool wrapper_makes_ctty = false);
 
 }  // namespace hf

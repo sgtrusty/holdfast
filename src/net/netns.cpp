@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cstdio>
 #include <regex>
 #include <thread>
 
@@ -51,6 +52,86 @@ WgInfo parse_wg_conf(const std::string& text) {
     }
     if (endpoints != 1) throw ProfileError("WireGuard config must contain exactly one Endpoint (found " + std::to_string(endpoints) + ")");
     return w;
+}
+
+long iptables_hits(const std::string& listing, const std::string& target, const std::string& in, const std::string& out) {
+    std::stringstream ss(listing);
+    std::string line;
+    while (std::getline(ss, line)) {
+        // "<num> <pkts> <bytes> <target> <prot> <opt> <in> <out> <source> <destination> ..."
+        const Strings t = split_ws(line);
+        if (t.size() < 8 || t[0].find_first_not_of("0123456789") != std::string::npos) continue;   // header / policy lines
+        if (t[3] != target || t[6] != in || t[7] != out) continue;
+        try { return std::stol(t[1]); } catch (...) { return -1; }
+    }
+    return -1;
+}
+
+long wg_transfer_rx(const std::string& out) {
+    const Strings t = split_ws(out);   // "<pubkey> <rx> <tx>" (the tab is whitespace too)
+    if (t.size() < 3) return -1;
+    try { return std::stol(t[t.size() - 2]); } catch (...) { return -1; }
+}
+
+bool config_has_preshared_key(const std::string& text) {
+    static const std::regex psk(R"(^\s*PresharedKey\s*=)", std::regex::icase);
+    std::stringstream ss(text);
+    std::string line;
+    while (std::getline(ss, line)) if (std::regex_search(line, psk)) return true;
+    return false;
+}
+
+bool has_nft_forward_drop(const std::string& ruleset) {
+    std::stringstream ss(ruleset);
+    std::string line;
+    while (std::getline(ss, line))
+        if (line.find("hook forward") != std::string::npos && line.find("policy drop") != std::string::npos) return true;
+    return false;
+}
+
+std::string explain_handshake_failure(const HandshakeTrail& t, const std::string& vh, const std::string& ep, int port) {
+    auto n = [](long v) { return v < 0 ? std::string("?") : std::to_string(v); };
+    std::string s = "where the handshake stops (packet counters of this attempt):\n";
+    s += "  sent from the namespace ........... " + n(t.sent) + "\n";
+    s += "  forwarded by this host ............ " + n(t.forwarded) + "\n";
+    s += "  answers back at this host ......... " + n(t.replies) + "\n";
+    s += "  answers delivered to the namespace  " + n(t.delivered) + "\n";
+    const std::string nft_fix =
+        "  allow holdfast's veth in your nftables forward chain (table/chain names vary; these are the common ones):\n"
+        "    sudo nft insert rule inet filter forward iifname \"hfh*\" ip daddr " + ep + " udp dport " + std::to_string(port) + " accept\n"
+        "    sudo nft insert rule inet filter forward oifname \"hfh*\" ct state established,related accept\n";
+    if (t.sent < 0 || t.forwarded < 0 || t.replies < 0 || t.delivered < 0)
+        return s + "cause: some counters could not be read (is `iptables` the nft or legacy variant? run with sudo -v first).";
+    if (t.sent == 0)
+        return s + "cause: the namespace never sent a handshake. Check that wg-quick really configured the interface and that the Endpoint\n"
+                   "  route exists: sudo ip netns exec <ns> wg show; sudo ip netns exec <ns> ip route";
+    if (t.forwarded == 0) {
+        s += "cause: the packets leave the namespace but never reach holdfast's FORWARD rule on " + vh + ", so another firewall on this host drops\n"
+             "  forwarded traffic first. ";
+        s += t.nft_forward_drop ? "Found one: an nftables chain at the forward hook with `policy drop` (the stock Arch /etc/nftables.conf has it).\n" + nft_fix
+                                : "Look at `sudo nft list ruleset`, firewalld, ufw or docker rules that drop forwarded traffic.\n";
+        return s;
+    }
+    if (t.replies == 0)
+        return s + "cause: the handshake left this machine (to " + ep + ":" + std::to_string(port) + ") and nothing came back: wrong Endpoint IP or port,\n"
+                   "  UDP blocked by your network, or the provider does not know this key (download a fresh WireGuard config and register its public key).";
+    if (t.delivered == 0)
+        return s + "cause: answers reach this host but not the namespace. Check reverse-path filtering (sysctl net.ipv4.conf.all.rp_filter) and\n"
+                   "  the NAT rule: sudo iptables -t nat -L POSTROUTING -v -n";
+    if (t.wg_rx_bytes == 0) {
+        const std::string psk = t.config_has_psk == 1 ? "this config has a PresharedKey line"
+                              : t.config_has_psk == 0 ? "this config has NO PresharedKey line: if your provider enabled one for this key, download a config that includes it"
+                                                      : "could not tell whether the config has a PresharedKey";
+        return s + "cause: the path and your firewall are fine: WireGuard sent its handshake and the answers reached the namespace, but\n"
+                   "  WireGuard accepted none of them (it has received 0 bytes), so it cannot validate what the server sends back. Usual reasons:\n"
+                   "   - the PresharedKey does not match the server's (" + psk + ")\n"
+                   "   - the key or config is stale, e.g. regenerated on the provider's site after this file was downloaded\n"
+                   "   - the packets arrive damaged (bad UDP checksum) or are not WireGuard answers; look at them with the profile started\n"
+                   "     under `verify = no`:  sudo ip netns exec hf-<profile> tcpdump -ni " + (vh.rfind("hfh", 0) == 0 ? "hfn" + vh.substr(3) : std::string("<veth>")) + " -vv udp\n"
+                   "  Quick bisect: run your old script with this exact config file. If it connects, tell us; if it fails too, the file is the problem.";
+    }
+    return s + "answers do reach the namespace and WireGuard has received data, so the path is fine. If there is still no handshake, the\n"
+               "  config or key is stale (download a fresh WireGuard config); a recent `latest-handshakes` value means the tunnel is up.";
 }
 
 bool valid_ns_name(const std::string& n) {
@@ -118,7 +199,7 @@ void NetNs::up() {
     have_ip6_ = which("ip6tables").has_value();
     if (!which("wg-quick") || !which("ip") || !which("iptables")) throw Error("need ip, iptables and wg-quick (wireguard-tools) installed");
 
-    if (!is_root()) { log::info("requesting sudo for network setup (one prompt; ticket is kept alive until cleanup)"); if (!run({"sudo", "-v"}).ok()) throw Error("sudo authentication failed"); sudo_keepalive_start(); }
+    sudo_acquire();   // at most one prompt; revoked again in down() if holdfast was the one that asked for it
 
     // We hold the lock => anything with our name is a stale leftover from a crashed run.
     teardown(true);
@@ -155,7 +236,7 @@ void NetNs::up() {
         add_host_rule({"iptables", "", "INPUT", "-i " + vh_ + cm + " -j DROP", true, false});
 
         // Kill switch FIRST (default-deny), tunnel second: no window where traffic can leak.
-        log::info("arming kill switch (default DROP) before bringing the tunnel up");
+        log::debug("arming kill switch (default DROP) before bringing the tunnel up");
         for (const char* t : {"iptables", "ip6tables"}) {
             if (std::string(t) == "ip6tables" && !have_ip6_) continue;
             for (const char* ch : {"INPUT", "OUTPUT", "FORWARD"}) must(in_ns({t, "-P", ch, "DROP"}), "default policy");
@@ -174,8 +255,12 @@ void NetNs::up() {
             must(as_root({"install", "-D", "-m", "0644", rc.string(), "/etc/netns/" + cfg_.ns_name + "/resolv.conf"}), "netns resolv.conf");
         }
 
-        log::info("bringing up WireGuard inside " + cfg_.ns_name);
-        must(in_ns({"wg-quick", "up", wgfile}), "wg-quick up");
+        log::info("connecting the tunnel (kill switch armed first)");
+        {   // wg-quick narrates every command it runs on stderr; show that only with -v, or when it fails
+            auto r = capture_all(in_ns({"wg-quick", "up", wgfile}));
+            if (log::verbose() && !r.out.empty()) std::fputs(r.out.c_str(), stderr);
+            if (!r.ok()) throw Error("wg-quick failed to bring the tunnel up:\n" + trim(r.out));
+        }
         up_ = true;
         for (const char* t : {"iptables", "ip6tables"}) {
             if (std::string(t) == "ip6tables" && !have_ip6_) continue;
@@ -191,16 +276,61 @@ void NetNs::up() {
 
 void NetNs::verify_tunnel() {
     const std::string target = wg_.dns.empty() ? "1.1.1.1" : wg_.dns.front();
-    log::info("verifying tunnel (ping " + target + " through " + wgif_ + ")");
-    ping({target}, 3);  // first packet triggers the handshake
+    log::debug("verifying tunnel (ping " + target + " through " + wgif_ + ")");
+    // The first packet triggers the handshake. A reply is the strongest proof there is: the kill switch lets nothing else
+    // out, so an answer to this ping can only have come through the tunnel.
+    if (ping({target}, 3)) { log::info("tunnel up"); return; }
     for (int i = 0; i < 10; ++i) {
         auto r = capture(in_ns({"wg", "show", wgif_, "latest-handshakes"}));
         // "<pubkey>\t<unix-ts>"; ts==0 => no handshake yet
         auto tab = r.out.find('\t');
-        if (tab != std::string::npos && trim(r.out.substr(tab + 1)) != "0") { log::info("WireGuard handshake OK"); return; }
+        if (tab != std::string::npos && trim(r.out.substr(tab + 1)) != "0") { log::info("tunnel up"); return; }
         std::this_thread::sleep_for(std::chrono::milliseconds(700));
     }
-    throw Error("no WireGuard handshake after ~7s (wrong endpoint/keys, or UDP blocked); aborting");
+    // The cause is almost always the config, so say that first. The packet counters and the kernel's view are for -v.
+    std::string msg = "no WireGuard handshake after ~7s: the WireGuard config is probably wrong or stale. Download a fresh config from your "
+                      "provider (and make sure it includes the PresharedKey if your account uses one). Nothing leaked; the tunnel is torn down.";
+    if (log::verbose()) msg += "\n" + diagnose_handshake();
+    else msg += " Run with -v for the details.";
+    throw Error(msg);
+}
+
+// Called while the rules still exist (before teardown), so their packet counters are still there to read.
+std::string NetNs::diagnose_handshake() noexcept {
+    try {
+        const Strings flags = {"-L", "", "-v", "-n", "-x", "--line-numbers"};
+        auto listing = [&](const char* chain, bool in_namespace) {
+            Strings c = {"iptables"};
+            for (const auto& f : flags) c.push_back(f.empty() ? chain : f);
+            return capture(in_namespace ? in_ns(c) : as_root(c)).out;
+        };
+        const std::string ns_out = listing("OUTPUT", true), ns_in = listing("INPUT", true), host_fwd = listing("FORWARD", false);
+        HandshakeTrail t;
+        t.sent = iptables_hits(ns_out, "ACCEPT", "*", vn_);
+        t.delivered = iptables_hits(ns_in, "ACCEPT", vn_, "*");
+        t.forwarded = iptables_hits(host_fwd, "ACCEPT", vh_, "*");
+        t.replies = iptables_hits(host_fwd, "ACCEPT", "*", vh_);
+        // Only worth asking nftables when the packets died on the host (forwarded == 0): that is its only role in the story.
+        if (t.sent > 0 && t.forwarded == 0 && which("nft")) t.nft_forward_drop = has_nft_forward_drop(capture(as_root({"nft", "list", "ruleset"})).out);
+        t.wg_rx_bytes = wg_transfer_rx(capture(in_ns({"wg", "show", wgif_, "transfer"})).out);
+        t.config_has_psk = config_has_preshared_key(wg_.sanitized) ? 1 : 0;
+        std::string out = explain_handshake_failure(t, vh_, wg_.endpoint_ip, wg_.endpoint_port);
+        // What the kernel itself says settles what the counters cannot. Each field is asked for separately and stderr is
+        // included, so a failing `wg` is visible instead of looking like an empty answer. Nothing here prints a private key.
+        out += "\nthe interface as the kernel sees it (" + wgif_ + "):\n";
+        auto line = [&](const std::string& label, const Strings& cmd) {
+            std::string v = trim(capture_all(in_ns(cmd)).out);
+            for (char& c : v) if (c == '\n') c = ';';
+            for (char& c : v) if (c == '\t') c = ' ';
+            out += "  " + label + ": " + (v.empty() ? "(nothing)" : v) + "\n";
+        };
+        for (const char* sub : {"listen-port", "fwmark", "endpoints", "latest-handshakes", "transfer"})
+            line(sub, {"wg", "show", wgif_, sub});
+        line("rx/tx packets", {"cat", "/sys/class/net/" + wgif_ + "/statistics/rx_packets", "/sys/class/net/" + wgif_ + "/statistics/tx_packets"});
+        return out;
+    } catch (...) {
+        return "(could not read the packet counters to explain why)";
+    }
 }
 
 bool NetNs::selftest() {
@@ -215,8 +345,11 @@ bool NetNs::selftest() {
     return ok;
 }
 
-Strings NetNs::wrap(Strings inner) const {
+Strings NetNs::wrap(Strings inner, bool new_ctty) const {
     Strings w = in_ns({"setpriv", cat("--reuid=", user_.uid), cat("--regid=", user_.gid), "--init-groups", "--"});
+    // With the pty proxy, make the pty (our stdin) the controlling terminal of a NEW session here, after sudo and setpriv:
+    // sudo itself stays in your session and keeps recognising its ticket.
+    if (new_ctty) w.insert(w.end(), {"setsid", "-w", "-c", "--"});
     w.insert(w.end(), inner.begin(), inner.end());
     return w;
 }
@@ -265,11 +398,12 @@ void NetNs::teardown(bool quiet) noexcept {
 }
 
 void NetNs::down() noexcept {
-    if (!created_) return;
-    log::info("tearing down network namespace " + cfg_.ns_name);
-    teardown(true);
-    created_ = false; up_ = false;
-    sudo_keepalive_stop();
+    if (created_) {
+        log::debug("tearing down network namespace " + cfg_.ns_name);
+        teardown(true);
+        created_ = false; up_ = false;
+    }
+    sudo_keepalive_stop();   // idempotent; also covers a setup that failed before anything was created
 }
 
 void NetNs::cleanup_stale(const User& u, const std::string& ns, const fs::path& lock_dir) {
@@ -277,8 +411,9 @@ void NetNs::cleanup_stale(const User& u, const std::string& ns, const fs::path& 
     NetNs n(u, c);
     fs::create_directories(lock_dir);
     if (!n.lock_.try_acquire(lock_dir / ("netns-" + ns + ".lock"))) throw Error("namespace '" + ns + "' belongs to a live session");
-    if (!is_root()) { if (!run({"sudo", "-v"}).ok()) throw Error("sudo authentication failed"); }
+    sudo_acquire();
     n.teardown(false);
+    sudo_keepalive_stop();
     log::info("cleaned " + ns);
 }
 

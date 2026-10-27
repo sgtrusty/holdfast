@@ -73,7 +73,8 @@ RunResult run(const RunOpts& o) {
         int dn = o.quiet ? open("/dev/null", O_RDWR) : -1;
         if (in[0] >= 0) dup2(in[0], 0); else if (o.quiet) dup2(dn, 0);
         if (out[1] >= 0) dup2(out[1], 1); else if (o.quiet) dup2(dn, 1);
-        if (o.quiet || o.capture) { if (dn < 0) dn = open("/dev/null", O_RDWR); if (o.quiet) dup2(dn, 2); }
+        if (o.merge_stderr && out[1] >= 0) dup2(out[1], 2);
+        else if (o.quiet) dup2(dn, 2);
         execvp(av[0], av.data());
         _exit(127);
     }
@@ -105,6 +106,11 @@ RunResult run(const RunOpts& o) {
 
 RunResult run(const Strings& argv, bool quiet) {
     RunOpts o; o.argv = argv; o.quiet = quiet;
+    return run(o);
+}
+
+RunResult capture_all(const Strings& argv) {
+    RunOpts o; o.argv = argv; o.capture = true; o.quiet = true; o.merge_stderr = true;
     return run(o);
 }
 
@@ -168,6 +174,19 @@ static std::mutex g_ka_mu;
 static std::condition_variable g_ka_cv;
 static bool g_ka_stop = false;
 
+static bool g_ticket_ours = false;   // we asked for the password, so we revoke the ticket when done
+
+void sudo_acquire() {
+    if (is_root()) return;
+    const bool had_ticket = run({"sudo", "-n", "-v"}, true).ok();      // valid before we started: not ours to revoke
+    if (!had_ticket) {
+        log::info("sudo is needed for the network setup (asked once, revoked again afterwards)");
+        if (!run({"sudo", "-v"}).ok()) throw Error("sudo authentication failed");
+    }
+    g_ticket_ours = !had_ticket;
+    sudo_keepalive_start();
+}
+
 void sudo_keepalive_start() {
     if (is_root() || g_ka.joinable()) return;
     g_ka_stop = false;
@@ -181,10 +200,15 @@ void sudo_keepalive_start() {
     });
 }
 void sudo_keepalive_stop() {
-    if (!g_ka.joinable()) return;
-    { std::lock_guard<std::mutex> l(g_ka_mu); g_ka_stop = true; }
-    g_ka_cv.notify_all();
-    g_ka.join();
+    if (g_ka.joinable()) {
+        { std::lock_guard<std::mutex> l(g_ka_mu); g_ka_stop = true; }
+        g_ka_cv.notify_all();
+        g_ka.join();
+    }
+    if (g_ticket_ours) {                                                // de-escalate: nothing else may ride on our ticket
+        g_ticket_ours = false;
+        if (run({"sudo", "-k"}, true).ok()) log::debug("sudo ticket revoked");
+    }
 }
 
 // ---- files -------------------------------------------------------------------
@@ -241,6 +265,20 @@ void make_private_dir(const fs::path& p) {
     if (ec) throw Error(cat("cannot create ", p.string(), ": ", ec.message()));
     for (auto& q : todo) own(q);
     chmod(p.c_str(), 0700);
+}
+
+void make_secure_dir(const fs::path& p) {
+    std::error_code ec;
+    if (p.has_parent_path()) fs::create_directories(p.parent_path(), ec);
+    if (mkdir(p.c_str(), 0700) != 0 && errno != EEXIST) throw Error(cat("cannot create ", p.string(), ": ", std::strerror(errno)));
+    own(p);
+    struct stat st{};
+    // lstat: a pre-planted symlink or a directory owned by someone else must never be trusted.
+    if (lstat(p.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))
+        throw Error(cat(p.string(), " is not a plain directory; remove it and retry"));
+    if (st.st_uid != geteuid() && st.st_uid != g_own_uid)
+        throw Error(cat(p.string(), " is owned by another user (uid ", st.st_uid, "); refusing to use it"));
+    if (chmod(p.c_str(), 0700) != 0) throw Error(cat("cannot chmod ", p.string(), ": ", std::strerror(errno)));
 }
 
 std::string sha256_file(const fs::path& p) {

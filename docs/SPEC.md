@@ -30,7 +30,8 @@ src/
   core/bundle.{hpp,cpp}   Alpine fetch/verify/extract, provisioning stage, stamp, purge
   core/session.{hpp,cpp}  run_profile orchestration, validate_profile, net_test, doctor
   net/netns.{hpp,cpp}     WireGuard config parsing/sanitising, NetNs lifecycle, kill switch, self-test
-  ui/display.{hpp,cpp}    XephyrServer, host X11, ClipboardBridge
+  protocol/display/       display.{hpp,cpp} (Setup/Backend/open/validate), x11.{hpp,cpp} (Xephyr, host X11, xauth), wayland.{hpp,cpp} (host socket)
+  ui/clipboard.{hpp,cpp}  ClipboardBridge, sanitize_clipboard  (ui/termfilter.*: terminal escape filter)
 tests/test_main.cpp       83 dependency-free unit checks      tests/e2e.sh  real-bwrap smoke test
 profiles/*.profile        example profiles                    docs/                this documentation
 ```
@@ -42,11 +43,13 @@ Dependency direction (no cycles): `util` ← `core/{profile,paths,argbuilder}` �
 ## 3. CLI
 
 ```
-holdfast run [opts] PROFILE [-- CMD...]     holdfast bundle setup|shell|info|purge PROFILE [--force]
+holdfast run [opts] PROFILE [-- CMD...]     holdfast libs [--check|--refresh] [OS]
 holdfast print|check PROFILE                holdfast net-test PROFILE | net-cleanup NAME
-holdfast purge PROFILE [-y]                 holdfast init [NAME] | list | doctor | version
-opts: --net=none|host|ivpn --wg=FILE --cwd=DIR --no-cwd -y -n/--dry-run -v
+holdfast list [libs|os]                     holdfast doctor | help | version
+opts: --net=none|pasta|host|ivpn --wg=FILE --cwd=DIR --no-cwd -y -n/--dry-run --refresh --check -v
 ```
+There is no bundle or purge command: a bundle profile sets its userland up on first `run`, and state is plain folders
+under the data dir that you can inspect or delete (`doctor` prints the location). Details: `docs/CONCEPTS.md`, `src/cli/args.cpp`.
 `--` ends option parsing; everything after replaces `[profile] command`.
 
 ## 4. Profile model
@@ -62,12 +65,12 @@ is a `ProfileError`. Inline comments: whitespace + `#`.
 3. Bundle mode: require installed bundle; warn when the provision stamp no longer matches the profile.
 4. Working tree: choose cwd; `Policy::check_cwd` (throws → exit 3); confirm on `/dev/tty` for `cwd=ask` (no tty ⇒ not mounted).
 5. Create the per-run **session dir** `<XDG_RUNTIME_DIR>/holdfast/<name>.<pid>` (0700; fallback `/tmp/holdfast-UID`).
-6. Start network (`NetNs::up`) → display (`XephyrServer::start` / `host_x11`) in that order.
+6. Start network (`NetNs::up`) → display (`display::open`: Xephyr, host X11 or the host Wayland socket) in that order.
 7. `build_plan` (§6) – writes session files, returns the argv.
 8. Start `ClipboardBridge` if configured.
 9. `launcher_argv` writes `bwrap.args` (NUL-separated, 0600) and returns the trampoline argv; wrap with `NetNs::wrap` (`[sudo] ip netns exec NS setpriv --reuid … --`) or `as_user` (setpriv when root).
 10. `run_with_signals`: SIGTERM/SIGHUP forwarded to the child chain; SIGINT swallowed (tty already delivered it to the process group).
-11. Teardown by RAII in reverse order: clipboard → Xephyr (TERM, then KILL) → netns (rules, namespace, veth, `/etc/netns/NS`, `ip_forward`, sudo keepalive) → session dir.
+11. Teardown by RAII in reverse order: clipboard → display backend (Xephyr: TERM, then KILL) → netns (rules, namespace, veth, `/etc/netns/NS`, `ip_forward`, sudo keepalive) → session dir.
 
 `--dry-run` executes 1-7 with *no* network/display side effects (placeholder display `:90`) and prints
 `ArgBuilder::pretty()`.
@@ -112,16 +115,20 @@ but binaries are still checked against the deny set.
 ## 8. Bundle subsystem
 
 Layout: `<data>/cache/alpine/<arch>/alpine-minirootfs-X.Y.Z-<arch>.tar.gz`,
-`<data>/profiles/<name>/{rootfs,home,provision.stamp}`; `<data>` = `$HOLDFAST_HOME` or
-`~/.local/share/holdfast`. Arch ∈ {x86_64, aarch64}; bundles are per profile *and* per host arch.
+`<data>/bundles/<os>/{rootfs,spec.stamp,tarball.sha256}`, `<data>/profiles/<name>/{home,provision.stamp}`; `<data>` =
+`$HOLDFAST_HOME` or `~/.local/share/holdfast`. Arch ∈ {x86_64, aarch64}. `<os>` is the `data/os` file the profile names.
 
-`bundle setup`: (1) resolve tarball name from the mirror index (`<mirror>/<version>/releases/<arch>/`),
-download (HTTPS-only, TLS≥1.2) unless cached; (2) verify sha256 against `alpine_sha256` if pinned, else
-against the mirror's `.sha256`; delete + fail on mismatch; (3) extract unprivileged into `rootfs.tmp`
-(`--no-same-owner`, no `/dev/*`), atomically rename; (4) provision: bwrap with the rootfs bound **writable**
-at `/`, `--uid 0 --gid 0` (userns-mapped), network on, fake home bound, running
-`set -e; apk update; apk add --no-cache <packages>; <provision lines…>`; (5) write the stamp
-`sha256(version|mirror|pin|packages|provision)`. Runs warn when the stamp differs.
+`bundle_ensure` (called by `run`; `print`/`check` only verify): nothing installed → set it up; installed and
+`spec.stamp` equal → done (re-provision only if the provision stamp differs); installed but the definition changed → error
+unless `--refresh`. Setting up, with no host process touching the downloaded bytes:
+(1) a **bootstrap sandbox** (`--unshare-all`, network through pasta, default seccomp, host `sh curl tar gzip sha256sum …`
+bound read-only, only `/cache` and `/work` writable) downloads `<mirror>/v<X.Y>/releases/<arch>/alpine-minirootfs-<X.Y.Z>-<arch>.tar.gz`
+(exact releases only; HTTPS, TLS ≥ 1.2) unless a cached file matches the pinned hash; (2) verifies sha256 against
+`alpine_sha256` if pinned, else against the mirror's `.sha256`, deleting the file and failing on mismatch; (3) extracts into
+`rootfs.tmp` (`--no-same-owner`, no `/dev/*`) and renames it to `rootfs`; the host then writes `spec.stamp =
+sha256(version|mirror|pin|packages)`; (4) a **provision sandbox**: the rootfs bound **writable** at `/`, `--uid 0 --gid 0`
+(userns-mapped), network through pasta, fake home bound, running `set -e; apk update; apk add --no-cache <packages>;
+<provision lines…>`; then `provision.stamp = sha256(version|mirror|pin|packages|provision)` is written.
 
 ## 9. Network namespace subsystem (`NetNs`)
 
@@ -139,14 +146,15 @@ dns → wg-quick up → wg-iface rules → verify`. Any exception → `down()` (
 ## 10. Display, clipboard, audio
 
 - **Xephyr**: first free display ≥ 90 (checks socket + lock), retry on early death; 16 random bytes cookie written as an X authority file with `FamilyWild` (matches regardless of the sandbox's different hostname), passed via `-auth`, bound at `/tmp/.Xauthority` with `XAUTHORITY`; `-nolisten tcp -terminate`, window title marks it untrusted. Abstract-socket access is per-netns, and the cookie is enforced either way.
-- **Host X11**: only with `allow_host_x11 = yes`; shares the real socket (+ your `XAUTHORITY`); warned loudly.
+- **Host X11**: only with `allow_host = yes` on a `server = host` display; shares the real socket (+ your `XAUTHORITY`); warned loudly.
 - **Clipboard**: inotify `IN_CLOSE_WRITE` on a session file bound into the sandbox; content ≤ 1 MiB is piped to `xclip -selection clipboard` / `wl-copy` as the user, then the file is truncated. One direction only.
 - **Audio**: binds only `$XDG_RUNTIME_DIR/pulse/native` read-only and sets `PULSE_SERVER`; logs the microphone warning.
 
 ## 11. Error handling & exit codes
 `Error` → 1 · `PolicyError` → 3 · unexpected `std::exception` → 70 · usage → 2 · otherwise child status.
 All diagnostics go to stderr with `[hf]`, `[hf:WARN]`, `[hf:ERROR]` prefixes; stdout is reserved for
-`print`, `list`, `init`, `bundle info`.
+`print`, `list`, `libs`, `doctor`. Colour (classic SGR, `src/util/style.cpp`) is used only when the stream is a terminal,
+`NO_COLOR` is unset and `TERM` is not `dumb`; piped output is always plain.
 
 ## 12. Verification status (v0.1)
 
@@ -157,5 +165,5 @@ All diagnostics go to stderr with `[hf]`, `[hf:WARN]`, `[hf:ERROR]` prefixes; st
 | netns lifecycle (add/veth/rules/kill-switch/teardown, concurrency lock, stale recovery, `ip_forward` restore, DNS overlay) | exercised for real with a stub `wg-quick`/`wg` |
 | Real WireGuard handshake against IVPN, `net-test` check 1 | **not exercised** (no tunnel available) |
 | Xephyr startup / cookie auth, clipboard bridge, host-X11, pulse | **not exercised** (no X server in CI image) |
-| `bundle setup` (download, verify, extract, apk provisioning) and bundle-mode *run* | plan generation tested against a fake rootfs; network stages **not exercised** |
-| Seccomp | not implemented (external BPF file supported) |
+| Bundle setup on first `run` (sandboxed download, verify, extract, apk provisioning) and bundle-mode *run* | spec/stamp logic and plan generation unit-tested; the sandboxed network stages **not exercised** |
+| Seccomp, pasta, terminal filter, `libs = minimal` | see `docs/DEFERRED.md` (written and unit-tested; not yet exercised under a real bwrap) |

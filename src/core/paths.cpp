@@ -7,25 +7,29 @@
 
 namespace hf {
 
-Paths make_paths(const User& u, const std::string& name) {
+Paths make_paths(const User& u, const std::string& name, const std::string& bundle_id) {
+    const std::string id = bundle_id.empty() ? name : bundle_id;
+    if (id.empty() || id.find('/') != std::string::npos || id == "." || id == "..")
+        throw Error("invalid bundle id: " + id);
     Paths p;
     if (const char* e = std::getenv("HOLDFAST_HOME"); e && *e) p.data = e;
     else p.data = u.home / ".local/share/holdfast";
     p.cache = p.data / "cache";
     p.state = p.data / "profiles" / name;
-    p.rootfs = p.state / "rootfs";
+    p.bundle = p.data / "bundles" / id;
+    p.rootfs = p.bundle / "rootfs";
     p.home = p.state / "home";
-    p.run_root = fs::exists(u.runtime_dir) ? u.runtime_dir / "holdfast"
-                                           : fs::path(cat("/tmp/holdfast-", u.uid));
+    // Never a shared /tmp path: without a per-user runtime dir, stay inside the user's own data dir.
+    p.run_root = fs::exists(u.runtime_dir) ? u.runtime_dir / "holdfast" : p.data / "run";
     return p;
 }
 
 fs::path make_session_dir(const User&, const Paths& p, const std::string& name) {
-    make_private_dir(p.run_root);
+    make_secure_dir(p.run_root);
     fs::path d = p.run_root / cat(name, ".", getpid());
     std::error_code ec;
     fs::remove_all(d, ec);
-    make_private_dir(d);
+    make_secure_dir(d);
     return d;
 }
 
@@ -89,15 +93,18 @@ Policy::Policy(const User& u, const Strings& extra) : user_(u) {
         ".config/BraveSoftware", ".config/Signal", ".config/Bitwarden", ".config/rclone",
         ".local/share/keyrings", ".local/share/kwalletd", ".npmrc", ".pypirc",
         ".cargo/credentials.toml", ".terraform.d", ".config/holdfast",
+        ".config/wssch", ".local/share/holdfast", ".vault-token", ".oci", ".config/op", ".config/1Password",
+        ".config/keepassxc", ".config/doctl", ".bash_history", ".zsh_history",
     };
     for (auto r : home_rel) deny_.push_back(canon(h / r));
     const char* abs[] = {
         "/etc/shadow", "/etc/gshadow", "/etc/sudoers", "/etc/sudoers.d", "/etc/ssh",
         "/root", "/boot", "/var/run/docker.sock", "/run/docker.sock",
-        "/var/lib/docker", "/var/run/libvirt", "/run/libvirt", "/sys", "/proc/kcore",
+        "/var/lib/docker", "/var/run/libvirt", "/run/libvirt", "/sys", "/proc/kcore", "/tmp/.X11-unix",
     };
     for (auto a : abs) deny_.push_back(canon(a));
-    for (const char* r : {"bus", "gnupg", "keyring", "ssh-agent.socket", "gcr", "wayland-0"})
+    for (const char* r : {"bus", "gnupg", "keyring", "ssh-agent.socket", "gcr", "wayland-0", "wayland-1", "systemd", "docker.sock",
+                           "docker", "podman", "pipewire-0", "pulse"})
         deny_.push_back(canon(u.runtime_dir / r));
     VarCtx vc; vc.user = &u;
     for (auto& e : extra) for (auto& x : expand_glob(e, vc)) deny_.push_back(canon(x));

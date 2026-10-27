@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <set>
 
+#include "core/launch.hpp"
+#include "core/seccomp.hpp"
 #include "util/log.hpp"
 #include "util/sys.hpp"
 
@@ -16,16 +18,21 @@ std::vector<fs::path> find_git_entries(const fs::path& root, size_t cap) {
     std::vector<fs::path> out;
     std::error_code ec;
     fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
-    while (!ec && it != end) {
+    for (; !ec && it != end; it.increment(ec)) {
         const fs::directory_entry& e = *it;
+        if (e.path().filename() != ".git") continue;
         std::error_code e2;
-        if (e.path().filename() == ".git") {
-            out.push_back(e.path());
-            if (e.is_directory(e2) && !e.is_symlink(e2)) it.disable_recursion_pending();
-            if (out.size() >= cap) break;
-        }
-        it.increment(ec);
+        // bwrap resolves a bind *source* through symlinks, so `.git -> ~/.ssh` would mount the target
+        // without ever passing Policy. A symlinked .git is never legitimate: refuse the tree.
+        if (e.is_symlink(e2))
+            throw PolicyError(cat("'", e.path().string(), "' is a symlink; refusing to mount a working tree with a symlinked .git"));
+        // Fail closed: a truncated scan would leave later repos writable.
+        if (out.size() >= cap)
+            throw Error(cat("more than ", cap, " .git entries under ", root.string(), "; mount a smaller subdirectory"));
+        out.push_back(e.path());
+        if (e.is_directory(e2)) it.disable_recursion_pending();   // never descend into a .git directory
     }
+    if (ec) throw Error(cat("cannot scan ", root.string(), " for .git entries (", ec.message(), "); refusing to mount it"));
     return out;
 }
 
@@ -50,22 +57,14 @@ Strings match_font_files(const fs::path& root, const Strings& families, size_t c
     return out;
 }
 
-void write_xauth(const fs::path& file, const std::string& num, const std::string& cookie) {
-    auto be16 = [](std::string& s, uint16_t v) { s.push_back(char(v >> 8)); s.push_back(char(v & 0xff)); };
-    static const std::string name = "MIT-MAGIC-COOKIE-1";
-    std::string d;
-    be16(d, 0xffff);                       // FamilyWild
-    be16(d, 0);                            // empty address
-    be16(d, static_cast<uint16_t>(num.size())); d += num;
-    be16(d, static_cast<uint16_t>(name.size())); d += name;
-    be16(d, static_cast<uint16_t>(cookie.size())); d += cookie;
-    write_file(file, d, 0600);
-}
-
 namespace {
 
 const char* kXdgSub[] = {".config", ".cache", ".local/share", ".local/state", ".local/bin"};
 
+// Identity files are generated, never the host's. There is deliberately NO /etc/machine-id: it is a stable per-install
+// identifier (a fingerprinting handle, and it names the journal and the DBus machine). The cost: GLib/DBus cannot start a
+// session bus or the accessibility bus ("Cannot spawn a message bus without a machine-id", org.a11y.Bus), so screen-reader
+// support is off in sandboxed GUI apps. If an app genuinely needs one, bind a RANDOM file: [fs] ro = /path/to/fake => /etc/machine-id
 void mount_identity(ArgBuilder& b, const Profile& p, const PlanCtx& c) {
     const std::string U = p.fake_user;
     const std::string uid = std::to_string(c.user.uid), gid = std::to_string(c.user.gid);
@@ -81,19 +80,46 @@ void mount_identity(ArgBuilder& b, const Profile& p, const PlanCtx& c) {
     b.ro_bind(c.session / "hosts", "/etc/hosts");
 }
 
+// resolv.conf: the host's, or (pasta) one that points at pasta's DNS forwarder, because a host stub
+// resolver on 127.0.0.x is not reachable from inside the private namespace.
+void bind_resolv_conf(ArgBuilder& b, const PlanCtx& c) {
+    if (c.pasta) {
+        write_file(c.session / "resolv.conf", pasta_resolv_conf(), 0644);
+        b.ro_bind(c.session / "resolv.conf", "/etc/resolv.conf");
+    } else if (fs::exists("/etc/resolv.conf")) {
+        b.ro_bind("/etc/resolv.conf", "/etc/resolv.conf");
+    }
+}
+
+// `libs = minimal`: bind exactly the files resolve_profile_data() took from the OS's saved file list for the
+// libs this profile `use`s. Nothing is analysed at run time; the list is created once per OS by
+// `holdfast libs --refresh` and committed under data/os/.
+void mount_listed_libs(ArgBuilder& b, const Profile& p, const PlanCtx& c) {
+    if (p.lib_binds.empty()) {
+        if (!p.bins.empty())
+            throw ProfileError(cat("libs = minimal resolved no library files for '", p.name, "': list the libs you need under [libs] use = ..., "
+                                   "or set `libs = full` in [fs]"));
+        return;
+    }
+    Strings sorted = p.lib_binds;
+    std::sort(sorted.begin(), sorted.end());                  // parents before children
+    for (const std::string& l : sorted) {
+        std::error_code ec;
+        if (!fs::exists(l, ec))
+            throw Error(cat("library file listed for this OS no longer exists on this host: ", l, " (the saved file list is out of date, e.g. after an upgrade): "
+                            "run `holdfast libs --check` to see what changed, `holdfast libs --refresh` to update it, or set `libs = full`"));
+        c.policy->check_bind(l, false);
+        b.ro_bind(canon(l), l);
+    }
+}
+
 void mount_host_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, const VarCtx& vc) {
     b.dir("/usr/bin");
     b.symlink("usr/bin", "/bin").symlink("usr/bin", "/sbin").symlink("usr/bin", "/usr/sbin");
 
-    if (p.libs) {  // shared libraries only; binaries are whitelisted one by one below
-        for (const char* d : {"/usr/lib", "/usr/lib64"})
-            if (fs::is_directory(d)) b.ro_bind(d, d);
-        for (const char* l : {"/lib", "/lib64"}) {
-            std::error_code ec;
-            if (fs::is_symlink(l, ec)) { if (fs::exists(l, ec)) b.symlink(fs::read_symlink(l).string(), l); }
-            else if (fs::is_directory(l, ec)) b.ro_bind_try(l, l);
-        }
-    }
+    // usr-merge symlinks are needed in both modes (the dynamic loader path in every ELF goes through them);
+    // whole library directories only in `libs = full`.
+    bind_host_library_dirs(b, p.libs == LibsMode::Full);
 
     std::set<std::string> seen;
     for (const std::string& tok : p.bins) {
@@ -120,18 +146,24 @@ void mount_host_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, const 
             b.ro_bind_try(real, real);
     }
 
+    if (p.libs == LibsMode::Minimal) mount_listed_libs(b, p, c);
+
     if (p.fs_defaults) {
+        // CA trust: /etc/ssl and /etc/ca-certificates are often only pointers. The roots themselves live under
+        // /usr/share/ca-certificates (Debian, Arch trust-source), /etc/pki (Fedora/RHEL) or via p11-kit's module config;
+        // without them a browser or curl using the system store trusts nothing and every HTTPS site fails.
         for (const char* d : {"/etc/ld.so.cache", "/usr/share/terminfo", "/usr/share/zoneinfo", "/etc/ssl",
-                              "/etc/ca-certificates", "/etc/os-release", "/usr/lib/os-release"})
+                              "/etc/ca-certificates", "/usr/share/ca-certificates", "/etc/pki", "/usr/share/p11-kit",
+                              "/etc/os-release", "/usr/lib/os-release"})
             if (fs::exists(d)) b.ro_bind_try(d, d);
-        if (c.network && fs::exists("/etc/resolv.conf")) b.ro_bind("/etc/resolv.conf", "/etc/resolv.conf");
+        if (c.network) bind_resolv_conf(b, c);
     }
 }
 
 void mount_bundle_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, std::set<std::string>& etc_skip) {
     const fs::path R = c.paths.rootfs;
     if (!fs::is_directory(R / "usr"))
-        throw Error(cat("bundle for profile '", p.name, "' is not installed; run: holdfast bundle setup ", p.name));
+        throw Error(cat("the Alpine userland for profile '", p.name, "' is not set up yet; run the profile once (holdfast run ", p.name, ") and it is created"));
     for (const char* t : {"bin", "sbin", "lib", "lib64", "usr"}) {
         fs::path s = R / t;
         std::error_code ec;
@@ -140,7 +172,7 @@ void mount_bundle_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, std:
     }
     // /etc is rebuilt on a tmpfs: bundle files minus anything identity/network related.
     static const std::set<std::string> skip = {"passwd", "group", "shadow", "gshadow", "nsswitch.conf", "resolv.conf",
-                                               "hosts", "hostname", "machine-id", "mtab", "passwd-", "group-", "shadow-"};
+                                               "hosts", "hostname", "machine-id" /* see mount_identity: no stable host id */, "mtab", "passwd-", "group-", "shadow-"};
     etc_skip.insert(skip.begin(), skip.end());
     b.tmpfs("/etc");
     std::error_code ec;
@@ -152,7 +184,7 @@ void mount_bundle_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, std:
     }
     if (c.network) {
         // resolv.conf from host (or from the ip-netns overlay when running under ivpn).
-        if (fs::exists("/etc/resolv.conf")) b.ro_bind("/etc/resolv.conf", "/etc/resolv.conf");
+        bind_resolv_conf(b, c);
     }
 }
 
@@ -183,6 +215,17 @@ void mount_fonts(ArgBuilder& b, const Profile& p, const PlanCtx& c, const fs::pa
 // the plan
 // ---------------------------------------------------------------------------------
 
+void bind_host_library_dirs(ArgBuilder& b, bool whole) {
+    for (const char* l : {"/lib", "/lib64"}) {
+        std::error_code ec;
+        if (fs::is_symlink(l, ec)) { if (fs::exists(l, ec)) b.symlink(fs::read_symlink(l).string(), l); }
+        else if (fs::is_directory(l, ec) && whole) b.ro_bind_try(l, l);
+    }
+    if (whole)
+        for (const char* d : {"/usr/lib", "/usr/lib64"})
+            if (fs::is_directory(d)) b.ro_bind(d, d);
+}
+
 Plan build_plan(const Profile& p, const PlanCtx& c) {
     if (!c.policy) throw Error("internal: policy missing");
     Plan plan;
@@ -197,9 +240,18 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
     b.flag("--unshare-all").flag("--unshare-user").flag("--unshare-ipc").flag("--unshare-pid")
      .flag("--unshare-uts").flag("--unshare-cgroup");
     if (c.network) b.flag("--share-net");          // else --unshare-all already isolates it
+    if (p.net == NetMode::Host)
+        log::warn("net=host shares the host network namespace, which also exposes host *abstract* unix sockets "
+                  "(e.g. the X11 server's @/tmp/.X11-unix/X0, some D-Bus) regardless of display=none. "
+                  "Use net=ivpn for a private namespace.");
     b.flag("--die-with-parent");
-    if (p.new_session) b.flag("--new-session");     // blocks TIOCSTI keystroke injection
+    if (p.new_session && !c.pty_proxy) b.flag("--new-session");   // blocks TIOCSTI keystroke injection; with a pty proxy the sandbox's tty IS the proxy
     b.raw({"--cap-drop", "ALL"});
+    // bwrap applies --clearenv/--setenv strictly in order: --clearenv must come BEFORE every --setenv (DISPLAY, XAUTHORITY,
+    // PULSE_SERVER, HOME, ...) or it wipes them. Keep it here, ahead of the display/audio/environment sections below.
+    b.flag("--clearenv");
+    // Inside pasta's user namespace we may be mapped to uid 0; pin the identity the fake passwd describes.
+    if (c.pasta) b.raw({"--uid", uid, "--gid", std::to_string(c.user.gid)});
     if (p.disable_userns && c.userns_disable_supported) b.flag("--disable-userns");
     b.raw({"--hostname", p.hostname});
     b.raw({"--proc", "/proc"}).raw({"--dev", "/dev"});
@@ -269,13 +321,11 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
     }
 
     // -- display / audio / clipboard -------------------------------------------
-    if (c.display) {
-        b.bind(c.display->socket, c.display->socket);
-        b.setenv("DISPLAY", c.display->display);
-        if (!c.display->authfile.empty()) {
-            b.ro_bind(c.display->authfile, "/tmp/.Xauthority");
-            b.setenv("XAUTHORITY", "/tmp/.Xauthority");
+    if (c.display) {                                   // protocol-neutral: binds and variables, whatever X11 or Wayland needs
+        for (const auto& d : c.display->binds) {
+            if (d.rw) b.bind(d.host, d.sandbox); else b.ro_bind(d.host, d.sandbox);
         }
+        for (const auto& [k, v] : c.display->env) b.setenv(k, v);
     }
     if (p.audio) {
         fs::path sock = c.user.runtime_dir / "pulse/native";
@@ -294,8 +344,7 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
         b.bind(c.session / "clip", p.clipboard_path);
     }
 
-    // -- environment ------------------------------------------------------------
-    b.flag("--clearenv");
+    // -- environment (--clearenv was emitted at the top: see the comment there) ----------------
     b.setenv("HOME", fhome.string()).setenv("USER", U).setenv("LOGNAME", U).setenv("SHELL", "/bin/sh");
     b.setenv("XDG_RUNTIME_DIR", (fs::path("/run/user") / uid).string());
     if (p.root == RootMode::Host) b.setenv("PATH", "/usr/bin:" + (fhome / ".local/bin").string());
@@ -313,13 +362,20 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
     Strings cmd = c.command_override.empty() ? p.command : c.command_override;
     if (cmd.empty()) throw ProfileError("no command: set [profile] command or pass one after --");
     for (auto& w : cmd) w = expand(w, vc);
-    if (!p.wm.empty()) {
-        Strings wrapped = {"/bin/sh", "-c", p.wm + " & exec \"$@\"", "holdfast"};
+    if (c.display && !c.display->background.empty()) {   // X11: the window manager; nothing for Wayland
+        Strings wrapped = {"/bin/sh", "-c", c.display->background + " & exec \"$@\"", "holdfast"};
         wrapped.insert(wrapped.end(), cmd.begin(), cmd.end());
         cmd = wrapped;
     }
     b.command(cmd);
-    if (!p.seccomp.empty()) plan.seccomp = expand(p.seccomp, vc);
+    if (p.seccomp == "none") {
+        log::warn("seccomp = none: no syscall filter; the sandbox can reach the full kernel syscall surface");
+    } else if (p.seccomp == "default") {
+        plan.seccomp = c.session / "seccomp.bpf";
+        write_default_seccomp(plan.seccomp);
+    } else {
+        plan.seccomp = expand(p.seccomp, vc);
+    }
     return plan;
 }
 

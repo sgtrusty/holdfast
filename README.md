@@ -1,125 +1,64 @@
 # holdfast
 
-A small C++20 tool that launches programs inside a **bubblewrap** sandbox whose
-contents are *declared*, not inherited. It merges four earlier approaches:
-
-| Origin | What it contributed |
-|---|---|
-| `develbox.sh` | **Bundle mode**: the sandbox's whole userland is a private, hash-verified Alpine minirootfs, so your host's `/usr`, `/etc`, `/bin` are never visible. Per-arch, per-profile. |
-| `lvim` | **Host-whitelist mode**: expose only named binaries + libs from the host; fake `passwd`/`group`/`nsswitch`; persistent fake `$HOME`; `.git` re-bound read-only inside the mounted working tree; refusal to mount `$HOME`/`/`; one-way clipboard bridge; offline by default with an online "sync" switch. |
-| `run-ivpn-librewolf.sh` | **IVPN/WireGuard in a network namespace** with a kill switch, nested **Xephyr** display (only its socket is shared), minimal font set, mic warning. |
-| `wssch` bwrap helper | **Structure**: allowlist → argv builder → `--args` fd, `findGitDirs` pruning, `--clearenv`-style hygiene. |
-
-On top of that it adds a central **deny-list policy** (symlink-safe), strict
-profile parsing that fails closed, and a considerably hardened network setup
-(see *What changed vs. the scripts* below).
+A small C++20 tool that launches programs inside a **bubblewrap** sandbox whose contents are *declared*, not
+inherited: only the binaries, libraries and paths a profile lists exist inside. Offline by default, `.git` read-only,
+a default seccomp filter, and a filtered terminal. It fails closed: an unknown key or a denied mount is an error, never a
+warning.
 
 ```
 holdfast run lazyvim              # offline editor, current dir mounted at /shared, .git read-only
-holdfast run --net=host lazyvim   # same, online ("sync" mode)
-holdfast run librewolf-ivpn       # amnesic browser, nested X, all traffic via WireGuard netns
-holdfast bundle setup lazygit-dev # one-time: fetch+verify Alpine, apk add, build tools
-holdfast run lazygit-dev          # run inside the private Alpine userland
+holdfast run --net=pasta lazyvim  # same, online ("sync" mode) through a private pasta netns
+holdfast run librewolf-ivpn       # amnesic browser, nested X, all traffic via a WireGuard netns
+holdfast run lazygit-dev          # first run sets up its private Alpine userland (in sandboxes), then runs in it
+holdfast run --debug lazyvim      # a shell (bash, else sh) inside that exact sandbox, to test or configure
 holdfast print lazyvim            # show the exact bwrap command line, change nothing
+holdfast doctor                   # what this host can do, and where holdfast keeps its files
 ```
 
 ## Build
 
-holdfast builds with [predep](https://github.com/10per5/predep) driving
-[premake5](https://premake.github.io/) (no CMake). Install both, then:
-
 ```sh
-# one-time: put premake5 + predep on PATH (Linux x86_64)
-curl -fsSL "https://github.com/premake/premake-core/releases/download/v5.0.0/premake-5.0.0-linux.tar.gz" \
-  | tar -xz && install -m 0755 premake5 /usr/local/bin/
-curl -fsSL "https://github.com/10per5/predep/releases/latest/download/predep-linux-x86_64.tar.gz" \
-  | tar -xz && install -m 0755 predep /usr/local/bin/
-premake5 --version && predep --version
-
-predep                # build the holdfast binary            -> bin/holdfast
-predep check          # build + unit tests                   (zero warnings is the bar)
-predep e2e            # real-bwrap smoke test (non-root, needs userns)
-sudo predep install   # optional; installs binary + example profiles + docs
+predep                # build -> bin/holdfast       (needs premake5 + predep, bwrap, libseccomp headers)
+predep check          # build + unit tests          (zero warnings is the bar)
+# or: premake5 gmake && make config=release -j$(nproc) && ./bin/holdfast_tests
+holdfast doctor       # which optional features this host supports
 ```
 
-Or invoke premake5 directly:
+Install steps, requirements, optional tools and the Ubuntu AppArmor note: `docs/BUILD.md`.
 
-```
-premake5 gmake && make config=release -j$(nproc)     # -> bin/holdfast
-./bin/holdfast_tests                                 # unit checks
-```
+## How it works, in five lines
 
-Requirements: Linux, C++20 compiler, `premake5` (any recent 5.x), `make`,
-`predep`, and `bwrap` (tested with 0.9.0; ≥ 0.8 needed for `--disable-userns`).
-No third-party C++ libraries. Run `holdfast doctor` to see which optional
-features your host supports.
+- A **profile** (`.profile`, INI) declares one sandbox; unknown keys are errors.
+- **Host mode** binds only the listed binaries and library files; **bundle mode** uses a private, hash-pinned Alpine userland.
+- Reusable pieces live in `data/`: `profile/`, `lib/` (what a tool needs) and `os/` (an OS setup).
+- **Network** is `none` by default; `pasta` gives a private namespace with internet; `ivpn` forces a WireGuard tunnel.
+- Every host path goes through a symlink-safe **policy** (`~/.ssh`, credentials, sockets, `$HOME`, `/` are refused).
 
-> **Warnings are errors.** The build enables `-Werror` by default to keep the
-> "zero warnings" bar. To relax it for a local build: `HOLDFAST_WERROR=OFF predep`.
+## Documentation
 
-Optional runtime tools: `curl tar sha256sum` (bundle), `ip iptables wg-quick wg ping sudo setpriv`
-(ivpn), `Xephyr` (nested display), `xclip` or `wl-copy` (clipboard).
+| | |
+|---|---|
+| `docs/CONCEPTS.md` | profiles, userland modes, network, display, working tree, policy |
+| `docs/PROFILE_REFERENCE.md` | every profile key |
+| `docs/DATA.md` | `data/lib` and `data/os`, the per-OS library file lists, shared bundles |
+| `docs/INTEGRATION.md` | using holdfast from another project or from an agent |
+| `docs/SAFETY.md` · `docs/THREAT_MODEL.md` | what it protects, what it does not, exit codes |
+| `docs/NETWORK.md` | the IVPN/WireGuard namespace and its kill switch |
+| `docs/DEFERRED.md` | known limitations and untested areas |
+| `docs/SPEC.md` · `docs/HISTORY.md` | technical design; where it came from |
 
-> **Ubuntu 24.04+**: AppArmor blocks unprivileged user namespaces for bwrap by
-> default. Either install a bwrap AppArmor profile or set
-> `kernel.apparmor_restrict_unprivileged_userns=0`. `holdfast doctor` detects this.
+## AGENTS
 
-## Concepts
+You are an AI agent (or a human in a hurry) who just landed on this repository. Two different jobs, two different entry points:
 
-**Profile** – an INI file describing one sandbox (see `docs/PROFILE_REFERENCE.md`).
-Looked up by name in `$HOLDFAST_PROFILES`, `~/.config/holdfast/profiles/`,
-`/etc/holdfast/profiles/`, or passed as a path. Unknown sections/keys are errors.
-Examples live in `profiles/`; `holdfast init NAME > ~/.config/holdfast/profiles/NAME.profile`.
-
-**Userland modes**
-- `mode = host` – a tmpfs root is assembled from: libraries (`/usr/lib*`, read-only), each binary in `[bin] allow` bound individually at `/usr/bin/<name>`, plus the files you list in `[fs]`. Anything not listed does not exist.
-- `mode = bundle` – the userland is `~/.local/share/holdfast/profiles/<name>/rootfs`, an Alpine minirootfs downloaded over HTTPS, sha256-verified (optionally pinned), extracted unprivileged, then provisioned (`apk add`, your `provision` lines) in a network-enabled, writable stage. Day-to-day runs mount it read-only.
-
-**Network** – `none` (default, fresh empty netns), `host`, or `ivpn` (WireGuard inside `hf-<profile>`, see below).
-
-**Display** – `none`, `xephyr` (private nested X server with a random cookie; only its socket enters the sandbox), or `host` (requires `allow_host_x11 = yes`, because it hands over your keyboard and screen).
-
-**Working tree** – `cwd = ask|yes|none`: the current directory is bound read-write at `/shared`; every `.git` (directory *or* worktree/submodule file) inside is re-bound read-only.
-
-**Policy** – before any host path is bound it is canonicalised (symlinks resolved) and checked against a deny-list (`~/.ssh`, `~/.gnupg`, cloud/browser credentials, `/etc/shadow`, docker/libvirt sockets, session bus, …) and a sensitive-root list (`/`, `$HOME`, `/home`, removable-media roots, `/usr`, `/etc`, …). A mount is refused if it *is*, is *inside*, or would *contain* a denied path. Extend with `[fs] deny = …`.
-
-## IVPN / WireGuard namespace
-
-```
-host                           netns hf-<profile>
-hfhN 10.200.N.1/30 ──veth── hfnN 10.200.N.2/30     hfwgN (wireguard)
-  NAT+FORWARD only for                 INPUT/OUTPUT/FORWARD policy DROP;
-  endpoint:port/udp                    allowed: lo, veth→endpoint:port, wg iface
-```
-Needs `sudo` (one prompt, kept alive until cleanup) or run as `sudo -E holdfast …`.
-`holdfast net-test PROFILE` brings it up and checks: tunnel carries traffic, the
-direct veth path is blocked, traffic dies when the wg interface is down, policy is DROP.
-
-### What changed vs. the scripts
-
-- Kill switch is armed **before** `wg-quick up` (default-DROP policy, not appended rules) – no leak window; IPv6 gets the same treatment.
-- Host NAT/FORWARD/INPUT rules are scoped to **endpoint:port/udp only**, tagged with a comment, and the veth is otherwise dropped on the host (the old rules MASQUERADE-d and forwarded the whole subnet).
-- A per-namespace **flock**: a second session of the same profile is refused instead of tearing down the first one's network (the old script ran `cleanup` unconditionally at start). Crashed leftovers are found by tag and removed (`holdfast net-cleanup NAME`).
-- WireGuard configs containing `PreUp/PostUp/PreDown/PostDown/SaveConfig/Table` are **rejected** (wg-quick would execute them as root). Endpoint must be an IPv4 literal (no DNS query outside the tunnel). The config is copied to a private dir under a safe interface name; your file is never modified.
-- `ip_forward` is restored on exit if holdfast changed it.
-- No `--ro-bind / /` of the whole host; no host `/etc/group` leak (lvim bound it); fresh `/dev`; `--clearenv`; fake `/etc/hosts`; no `machine-id`.
-- Downloads are HTTPS-only and **hash-verified** (develbox fetched Go/Rust unverified).
-- The shell is never used to run a command: everything is argv; the only `sh` is a constant 3-line trampoline that opens the args file.
-
-## Safety notes (read these)
-
-- `audio = pulse` exposes the **microphone** to every process in the sandbox.
-- `new_session = yes` (default) prevents TIOCSTI keystroke injection, but also means the terminal's Ctrl-C reaches **holdfast**, not programs inside. Use it for editors/GUIs; set `no` for interactive shells you trust more (and run them in tmux).
-- `[clipboard] mode = out` lets the sandbox *set* your host clipboard (not read it).
-- The `.git` guard protects history/hooks of repos that exist at launch. It does not stop the sandbox from writing a hostile `Makefile`/`.envrc`/IDE task that *you* later run outside.
-- Bundle provisioning runs **with network** and trusts the packages/commands in your profile.
-- The Alpine hash comes from the same mirror as the tarball (integrity, not authenticity). Pin `alpine_sha256` for real supply-chain assurance.
-- bwrap is not a VM: kernel bugs reachable through the syscall surface apply. A built-in seccomp filter is on the roadmap; meanwhile `[profile] seccomp = file.bpf` loads yours.
-
-See `docs/THREAT_MODEL.md` for scope and `docs/SPEC.md` for the technical design.
-
-## Exit codes
-`0` ok · `1` error · `2` usage · `3` refused by policy · `70` internal · otherwise the sandboxed command's exit code (`128+n` if killed by signal `n`).
-
-## Roadmap
-Built-in libseccomp filter · minimal-library mode (resolve `DT_NEEDED` per allowed binary instead of binding `/usr/lib`) · nftables-native backend · Wayland socket passthrough with security-context · `alpine` signature (GPG) verification · TOML profiles · overlayfs bundles (bwrap ≥ 0.11) · per-profile resource limits (cgroups).
+- **Changing holdfast itself** (code, profiles, data files, docs): read **`AGENTS.md`** first. It has the build and test
+  commands, the invariants you must not break (no shell strings, fail closed, restrictive defaults, RAII cleanup) and a
+  table of which files to touch for each kind of change.
+- **Using holdfast from another project** (to sandbox a command, an editor, an AI agent, a build): read
+  **`docs/INTEGRATION.md`**. In short:
+  - Run the `holdfast` binary as a **subprocess** with an argv vector: `holdfast run -y --cwd=DIR ./your.profile -- cmd args...`.
+    **Do not link it** as a library: `bin/holdfast_core.a` is an internal convenience with no stable API or ABI, no `.so`
+    exists, and the process boundary is part of the security design.
+  - stdout is the program's output and data (`print`, `list`, `init`); logs go to stderr; exit `3` means refused by policy.
+  - Keep a small `.profile` in your repository (copy one from `data/profile/` as a start; `holdfast list -v` shows where the shipped ones live), and `holdfast check`
+    it. Do not weaken defaults (network, seccomp, terminal filter, `.git` protection) unless the user asked.
