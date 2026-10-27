@@ -48,7 +48,7 @@ The environment is otherwise cleared.
 `xauth = yes|no` (xephyr cookie) · `allow_host_x11 = yes` (required for `mode=host`).
 
 ## [audio]  `mode = none|pulse` – pulse also grants microphone access.
-## [clipboard]  `mode = none|out` · `path` (in-sandbox file, default `/tmp/clip_pipe`).
+## [clipboard]  `mode = none|out` · `path` (in-sandbox file, default `/tmp/clip_pipe`) · `sanitize = yes|no` (default `yes`: strip control characters, incl. ESC/CR/DEL/C1 and bidi overrides; `\n` and `\t` are kept).
 ## [git]  `protect = yes|no` – re-bind every `.git` read-only under the mounted tree.
 ## [fonts]  `allow = family …` – substring match on font file paths; only these are visible.
 

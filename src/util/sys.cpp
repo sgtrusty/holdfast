@@ -243,6 +243,20 @@ void make_private_dir(const fs::path& p) {
     chmod(p.c_str(), 0700);
 }
 
+void make_secure_dir(const fs::path& p) {
+    std::error_code ec;
+    if (p.has_parent_path()) fs::create_directories(p.parent_path(), ec);
+    if (mkdir(p.c_str(), 0700) != 0 && errno != EEXIST) throw Error(cat("cannot create ", p.string(), ": ", std::strerror(errno)));
+    own(p);
+    struct stat st{};
+    // lstat: a pre-planted symlink or a directory owned by someone else must never be trusted.
+    if (lstat(p.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))
+        throw Error(cat(p.string(), " is not a plain directory; remove it and retry"));
+    if (st.st_uid != geteuid() && st.st_uid != g_own_uid)
+        throw Error(cat(p.string(), " is owned by another user (uid ", st.st_uid, "); refusing to use it"));
+    if (chmod(p.c_str(), 0700) != 0) throw Error(cat("cannot chmod ", p.string(), ": ", std::strerror(errno)));
+}
+
 std::string sha256_file(const fs::path& p) {
     auto r = capture({"sha256sum", "--", p.string()});
     if (!r.ok() || r.out.size() < 64) throw Error("sha256sum failed for " + p.string());

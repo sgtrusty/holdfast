@@ -150,7 +150,7 @@ int run_profile(Profile p, const RunOptions& o) {
         std::printf("%s\n", plan.b.pretty().c_str());
         return 0;
     }
-    if (p.clipboard_out) cb = std::make_unique<ClipboardBridge>(pr.user, sd.path / "clip");
+    if (p.clipboard_out) cb = std::make_unique<ClipboardBridge>(pr.user, sd.path / "clip", p.clipboard_sanitize);
 
     Strings launch = launcher_argv(pr.bwrap, sd.path, plan.b, plan.seccomp);
     Strings full = ns ? ns->wrap(launch) : as_user(pr.user, launch);

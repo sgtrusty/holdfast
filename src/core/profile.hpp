@@ -65,6 +65,7 @@ struct Profile {
     // [audio] [clipboard] [git] [fonts]
     bool audio = false;
     bool clipboard_out = false;
+    bool clipboard_sanitize = true;   // strip control chars before the text reaches the host clipboard
     std::string clipboard_path = "/tmp/clip_pipe";
     bool git_protect = true;
     Strings font_families;

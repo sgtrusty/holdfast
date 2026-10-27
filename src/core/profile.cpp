@@ -162,6 +162,7 @@ Profile parse_profile(const std::string& text, const std::string& o) {
                 else bad(l, o, "expected none|out");
             }
             else if (k == "path") p.clipboard_path = v;
+            else if (k == "sanitize") p.clipboard_sanitize = as_bool(l, o);
             else bad(l, o, "unknown key");
         } else if (s == "git") {
             if (k == "protect") p.git_protect = as_bool(l, o); else bad(l, o, "unknown key");

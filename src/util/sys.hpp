@@ -50,6 +50,9 @@ std::optional<fs::path> which(const std::string& name, const std::string& path_e
 std::string read_file(const fs::path& p, size_t max_bytes = 1u << 20);
 void write_file(const fs::path& p, const std::string& data, mode_t mode = 0600);
 void make_private_dir(const fs::path& p);       // mkdir -p, 0700 on created leaves
+// Like make_private_dir, but for dirs holding launcher input (bwrap.args): the leaf must be a real
+// directory (not a symlink) owned by us / the sudo user, and is forced to 0700, else throws.
+void make_secure_dir(const fs::path& p);
 std::string sha256_file(const fs::path& p);     // via sha256sum
 std::string sha256_str(const std::string& s);
 

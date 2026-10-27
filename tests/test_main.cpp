@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include "core/plan.hpp"
+#include "ui/display.hpp"
 #include "net/netns.hpp"
 #include "util/sys.hpp"
 
@@ -78,6 +79,9 @@ int main() {
         THROWS(PolicyError, p.check_bind("/home/alice/.config/BraveSoftware/x", false));
         THROWS(PolicyError, p.check_bind("/data/secret/k", false));      // user deny
         THROWS(PolicyError, p.check_bind("/etc/shadow", false));
+        THROWS(PolicyError, p.check_bind("/home/alice/.config/wssch", false));
+        THROWS(PolicyError, p.check_bind("/home/alice/.local/share/holdfast/profiles", false));
+        THROWS(PolicyError, p.check_bind("/run/user/1000/docker.sock", false));
         THROWS(PolicyError, p.check_bind("/usr/lib/x", true));           // rw into system
         THROWS(PolicyError, p.check_bind("/run/media/alice/USB", true)); // removable-media root
         p.check_bind("/home/alice/Projects/foo", true);                  // fine
@@ -145,6 +149,39 @@ int main() {
         auto g = find_git_entries(d);
         CHECK(g.size() == 3);
         fs::remove_all(d);
+    });
+
+    test("git entries: fail closed", [] {
+        char tmpl[] = "/tmp/hf-git2-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        fs::create_directories(d + "/a/.git");
+        fs::create_directories(d + "/b/.git");
+        THROWS(Error, find_git_entries(d, 1));                     // cap exceeded must not truncate silently
+        fs::create_directories(d + "/c");
+        fs::create_symlink("/home", d + "/c/.git");
+        THROWS(PolicyError, find_git_entries(d));                  // symlinked .git is refused
+        fs::remove_all(d);
+    });
+
+    test("secure dir", [] {
+        char tmpl[] = "/tmp/hf-sec-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        make_secure_dir(d + "/ok");
+        CHECK((fs::status(d + "/ok").permissions() & fs::perms::others_all) == fs::perms::none);
+        fs::create_directories(d + "/real");
+        fs::create_symlink(d + "/real", d + "/link");
+        THROWS(Error, make_secure_dir(d + "/link"));               // pre-planted symlink
+        fs::remove_all(d);
+    });
+
+    test("clipboard sanitize", [] {
+        CHECK(sanitize_clipboard("a\tb\nc") == "a\tb\nc");
+        CHECK(sanitize_clipboard("x\x1b[31my\rz\x7f") == "x[31myz");
+        CHECK(sanitize_clipboard("p\xC2\x9Bq") == "pq");                   // C1 CSI
+        CHECK(sanitize_clipboard("a\xE2\x80\xAE" "b") == "ab");               // RLO
+        CHECK(sanitize_clipboard("caf\xC3\xA9 \xE2\x82\xAC") == "caf\xC3\xA9 \xE2\x82\xAC");   // normal UTF-8 untouched
+        CHECK(parse_profile("[profile]\nname=t\ncommand=sh\n[clipboard]\nmode=out\n", "t").clipboard_sanitize);
+        CHECK(!parse_profile("[profile]\nname=t\ncommand=sh\n[clipboard]\nmode=out\nsanitize=no\n", "t").clipboard_sanitize);
     });
 
     test("xauth file format", [] {

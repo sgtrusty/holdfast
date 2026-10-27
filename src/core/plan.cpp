@@ -16,16 +16,21 @@ std::vector<fs::path> find_git_entries(const fs::path& root, size_t cap) {
     std::vector<fs::path> out;
     std::error_code ec;
     fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
-    while (!ec && it != end) {
+    for (; !ec && it != end; it.increment(ec)) {
         const fs::directory_entry& e = *it;
+        if (e.path().filename() != ".git") continue;
         std::error_code e2;
-        if (e.path().filename() == ".git") {
-            out.push_back(e.path());
-            if (e.is_directory(e2) && !e.is_symlink(e2)) it.disable_recursion_pending();
-            if (out.size() >= cap) break;
-        }
-        it.increment(ec);
+        // bwrap resolves a bind *source* through symlinks, so `.git -> ~/.ssh` would mount the target
+        // without ever passing Policy. A symlinked .git is never legitimate: refuse the tree.
+        if (e.is_symlink(e2))
+            throw PolicyError(cat("'", e.path().string(), "' is a symlink; refusing to mount a working tree with a symlinked .git"));
+        // Fail closed: a truncated scan would leave later repos writable.
+        if (out.size() >= cap)
+            throw Error(cat("more than ", cap, " .git entries under ", root.string(), "; mount a smaller subdirectory"));
+        out.push_back(e.path());
+        if (e.is_directory(e2)) it.disable_recursion_pending();   // never descend into a .git directory
     }
+    if (ec) throw Error(cat("cannot scan ", root.string(), " for .git entries (", ec.message(), "); refusing to mount it"));
     return out;
 }
 
@@ -197,6 +202,10 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
     b.flag("--unshare-all").flag("--unshare-user").flag("--unshare-ipc").flag("--unshare-pid")
      .flag("--unshare-uts").flag("--unshare-cgroup");
     if (c.network) b.flag("--share-net");          // else --unshare-all already isolates it
+    if (p.net == NetMode::Host)
+        log::warn("net=host shares the host network namespace, which also exposes host *abstract* unix sockets "
+                  "(e.g. the X11 server's @/tmp/.X11-unix/X0, some D-Bus) regardless of display=none. "
+                  "Use net=ivpn for a private namespace.");
     b.flag("--die-with-parent");
     if (p.new_session) b.flag("--new-session");     // blocks TIOCSTI keystroke injection
     b.raw({"--cap-drop", "ALL"});
