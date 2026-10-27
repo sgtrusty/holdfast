@@ -244,7 +244,7 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
                   "(e.g. the X11 server's @/tmp/.X11-unix/X0, some D-Bus) regardless of display=none. "
                   "Use net=ivpn for a private namespace.");
     b.flag("--die-with-parent");
-    if (p.new_session) b.flag("--new-session");     // blocks TIOCSTI keystroke injection
+    if (p.new_session && !c.pty_proxy) b.flag("--new-session");   // blocks TIOCSTI keystroke injection; with a pty proxy the sandbox's tty IS the proxy
     b.raw({"--cap-drop", "ALL"});
     // Inside pasta's user namespace we may be mapped to uid 0; pin the identity the fake passwd describes.
     if (c.pasta) b.raw({"--uid", uid, "--gid", std::to_string(c.user.gid)});

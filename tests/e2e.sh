@@ -12,6 +12,8 @@ cwd = yes
 new_session = no
 [bin]
 allow = sh ls cat id touch mv
+[fs]
+libs = full
 P
 export HOLDFAST_PROFILES="$T/profiles" HOLDFAST_HOME="$T/data"
 fail=0

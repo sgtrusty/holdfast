@@ -24,6 +24,7 @@ struct PlanCtx {
     Strings command_override;
     bool userns_disable_supported = false;
     bool network = false;             // sandbox shares a (possibly netns-restricted) network
+    bool pty_proxy = false;           // the terminal is proxied through a pty: bwrap must NOT also setsid (--new-session)
     bool pasta = false;               // that network is a pasta namespace (own resolv.conf, uid mapping)
 };
 

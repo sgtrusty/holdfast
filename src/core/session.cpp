@@ -47,7 +47,7 @@ struct Prepared {
 Prepared prepare(const Profile& p) {
     Prepared r;
     r.user = resolve_user();
-    r.paths = make_paths(r.user, p.name);
+    r.paths = make_paths(r.user, p.name, p.bundle_id);
     r.policy = std::make_unique<Policy>(r.user, expanded_denies(p));
     r.bwrap = find_bwrap();
     r.ver = bwrap_version(r.bwrap);
@@ -101,6 +101,7 @@ int run_profile(Profile p, const RunOptions& o) {
 
     if (p.root == RootMode::Bundle) {
         if (!bundle_installed(pr.paths)) throw Error("bundle not installed; run: holdfast bundle setup " + p.name);
+        bundle_verify(p, pr.paths);
         if (!bundle_provisioned(p, pr.paths)) log::warn("profile changed since the bundle was provisioned; run: holdfast bundle setup " + p.name);
     }
 
@@ -125,6 +126,7 @@ int run_profile(Profile p, const RunOptions& o) {
     c.userns_disable_supported = pr.ver.at_least(0, 8, 0);
     c.network = p.net != NetMode::None;
     c.pasta = p.net == NetMode::Pasta;
+    c.pty_proxy = p.terminal == TermMode::Filter && terminal_proxy_possible();
     fs::path pasta;
     if (c.pasta && !o.dry) pasta = find_pasta();
 
@@ -163,7 +165,7 @@ int run_profile(Profile p, const RunOptions& o) {
     Strings full = ns ? ns->wrap(launch) : as_user(pr.user, launch);
     log::info(cat("starting '", p.name, "' (", p.root == RootMode::Host ? "host-whitelist" : "bundle", " userland, net=",
                   p.net == NetMode::None ? "none" : p.net == NetMode::Host ? "host" : p.net == NetMode::Pasta ? "pasta" : "ivpn", ")"));
-    int rc = run_with_signals(full);
+    int rc = run_sandbox(full, p.terminal == TermMode::Filter);
     log::info(cat("sandbox exited with code ", rc));
     return rc;    // destructors: clipboard -> Xephyr -> netns (rules, veth, namespace) -> session dir
 }

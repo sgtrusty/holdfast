@@ -14,9 +14,13 @@ cwd         = ask
 new_session = no
 
 [bundle]
-alpine_version = latest-stable
-# Optional: pin the minirootfs tarball's sha256 for reproducible/offline reuse.
-# alpine_sha256 = <64 hex>
+# Profiles with the same id share ONE userland (<data>/bundles/<id>/rootfs). They must agree on
+# alpine_version/alpine_mirror/alpine_sha256; holdfast refuses to run or set up a bundle whose recorded
+# spec differs ("holdfast bundle info NAME" shows the check). Packages and provision lines stay per profile.
+id = alpine-dev
+# Exact release + pinned hash: nothing moves under you (latest-stable and branch names are moving targets).
+alpine_version = 3.24.3
+alpine_sha256 = f8e1cafba9b1b283b5d30d06f9885c8d2bc161ffe9083ade8e2e157813a53407
 packages = ca-certificates build-base git bash curl go rust cargo
 # Run once, with network, as userns-root inside the bundle. HOME=/home/sandbox is persistent.
 provision = go install github.com/jesseduffield/lazygit@sh-integration

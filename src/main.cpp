@@ -146,15 +146,18 @@ int main(int argc, char** argv) {
             sub = pos[0];
             Profile p = load(pos[1]);
             User u = resolve_user();
-            Paths paths = make_paths(u, p.name);
+            Paths paths = make_paths(u, p.name, p.bundle_id);
             if (p.root != RootMode::Bundle) throw Error("profile '" + p.name + "' is not a bundle profile ([profile] mode = bundle)");
             if (sub == "info") {
-                std::printf("profile:     %s\nrootfs:      %s\ninstalled:   %s\nprovisioned: %s\nhome:        %s\n", p.name.c_str(),
-                            paths.rootfs.c_str(), bundle_installed(paths) ? "yes" : "no", bundle_provisioned(p, paths) ? "yes" : "no", paths.home.c_str());
+                std::string verdict = "n/a";
+                if (bundle_installed(paths)) { try { bundle_verify(p, paths); verdict = "matches this profile"; } catch (const Error& e) { verdict = e.what(); } }
+                std::printf("profile:     %s\nbundle id:   %s\nrootfs:      %s\ninstalled:   %s\nspec check:  %s\nprovisioned: %s\nhome:        %s\n", p.name.c_str(),
+                            paths.bundle.filename().c_str(), paths.rootfs.c_str(), bundle_installed(paths) ? "yes" : "no", verdict.c_str(),
+                            bundle_provisioned(p, paths) ? "yes" : "no", paths.home.c_str());
                 return 0;
             }
             if (sub == "purge") {
-                if (!confirm("Remove the bundle userland of '" + p.name + "' (fake $HOME is kept)?", yes)) return 1;
+                if (!confirm("Remove bundle '" + paths.bundle.filename().string() + "' (shared by every profile with this id; fake $HOMEs are kept)?", yes)) return 1;
                 bundle_purge(paths, false);
                 return 0;
             }
@@ -174,7 +177,7 @@ int main(int argc, char** argv) {
             o.dry = true; o.yes = true; o.command = o.command.empty() ? Strings{} : o.command;
             if (p.command.empty()) o.command = {"true"};
             if (p.root == RootMode::Bundle) std::fprintf(stderr, "bundle: %s\n", "not inspected by check (see `bundle info`)");
-            if (p.root == RootMode::Host || fs::exists(make_paths(resolve_user(), p.name).rootfs)) {
+            if (p.root == RootMode::Host || fs::exists(make_paths(resolve_user(), p.name, p.bundle_id).rootfs)) {
                 run_profile(p, o);
             }
             std::fprintf(stderr, "profile '%s' OK\n", p.name.c_str());
@@ -185,7 +188,7 @@ int main(int argc, char** argv) {
         if (cmd == "purge") {
             User u = resolve_user();
             Paths paths = make_paths(u, p.name);
-            if (!confirm("DELETE all state of '" + p.name + "' including its persistent fake $HOME at " + paths.state.string() + "?", yes)) return 1;
+            if (!confirm("DELETE all state of '" + p.name + "' including its persistent fake $HOME at " + paths.state.string() + "? (the bundle userland stays; use `bundle purge`)", yes)) return 1;
             bundle_purge(paths, true);
             return 0;
         }

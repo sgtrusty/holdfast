@@ -7,7 +7,11 @@ namespace hf {
 
 std::string alpine_arch();
 std::string provision_stamp(const Profile& p);
+std::string bundle_spec(const Profile& p);   // what must be identical for profiles that share a bundle id
 bool bundle_installed(const Paths& paths);
+// Fail closed: the installed bundle must have been built from exactly this profile's version/mirror/sha256
+// (and the tarball it pins, if any). Throws Error naming the bundle id otherwise.
+void bundle_verify(const Profile& p, const Paths& paths);
 bool bundle_provisioned(const Profile& p, const Paths& paths);
 
 // Download (cached, sha256-verified) + extract + provision (apk + profile lines).

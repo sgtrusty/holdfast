@@ -27,4 +27,12 @@ Strings pasta_argv(const fs::path& pasta, const Strings& inner);
 // Runs argv in the foreground, forwarding SIGTERM/SIGHUP, returns the exit code.
 int run_with_signals(const Strings& argv);
 
+// Like run_with_signals, but when `filter` is set and stdin+stdout are terminals the program runs on a
+// fresh pty that is its controlling terminal, and everything it prints passes through TermFilter before it
+// reaches your real terminal (no clipboard writes, no fake titles/links, no reply-injection, modes restored
+// on exit). Because the sandbox's tty is the pty, TIOCSTI can only type into the sandbox itself, so no
+// `--new-session` (and none of its Ctrl-C/job-control/ /dev/tty side effects) is needed.
+bool terminal_proxy_possible();
+int run_sandbox(const Strings& argv, bool filter);
+
 }  // namespace hf

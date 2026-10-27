@@ -81,6 +81,12 @@ Profile parse_profile(const std::string& text, const std::string& o) {
             else if (k == "hostname") p.hostname = v;
             else if (k == "new_session") p.new_session = as_bool(l, o);
             else if (k == "disable_userns") p.disable_userns = as_bool(l, o);
+            else if (k == "terminal") {
+                std::string x = lower(v);
+                if (x == "filter") p.terminal = TermMode::Filter;
+                else if (x == "passthrough") p.terminal = TermMode::Passthrough;
+                else bad(l, o, "expected filter|passthrough");
+            }
             else if (k == "seccomp") {
                 if (v.empty()) bad(l, o, "expected default|none|/path/to/filter.bpf");
                 p.seccomp = v;
@@ -183,7 +189,12 @@ Profile parse_profile(const std::string& text, const std::string& o) {
         } else if (s == "fonts") {
             if (k == "allow") append_words(p.font_families, v); else bad(l, o, "unknown key");
         } else if (s == "bundle") {
-            if (k == "alpine_version") p.alpine_version = v;
+            if (k == "id") {
+                static const std::regex id_ok("^[a-z0-9][a-z0-9._-]{0,63}$");   // becomes a directory name
+                if (!std::regex_match(v, id_ok)) bad(l, o, "expected [a-z0-9._-], at most 64 chars, not starting with . or -");
+                p.bundle_id = v;
+            }
+            else if (k == "alpine_version") p.alpine_version = v;
             else if (k == "alpine_mirror") p.alpine_mirror = v;
             else if (k == "alpine_sha256") p.alpine_sha256 = lower(v);
             else if (k == "packages") append_words(p.apk_packages, v);

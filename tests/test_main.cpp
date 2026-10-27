@@ -8,7 +8,9 @@
 #include "core/libs.hpp"
 #include "core/launch.hpp"
 #include "core/seccomp.hpp"
+#include "core/bundle.hpp"
 #include "ui/display.hpp"
+#include "ui/termfilter.hpp"
 #include "net/netns.hpp"
 #include "util/sys.hpp"
 
@@ -194,6 +196,9 @@ int main() {
         Profile p = parse_profile("[profile]\nname=t\ncommand=sh\nseccomp=none\n[fs]\nlibs=full\n[network]\nmode=pasta\n", "t");
         CHECK(p.libs == LibsMode::Full && p.seccomp == "none" && p.net == NetMode::Pasta);
         THROWS(ProfileError, parse_profile("[profile]\nname=t\ncommand=sh\n[fs]\nlibs=yes\n", "t"));
+        CHECK(d.terminal == TermMode::Filter);
+        CHECK(parse_profile("[profile]\nname=t\ncommand=sh\nterminal=passthrough\n", "t").terminal == TermMode::Passthrough);
+        THROWS(ProfileError, parse_profile("[profile]\nname=t\ncommand=sh\nterminal=raw\n", "t"));
     });
 
     test("elf: DT_NEEDED of this very binary", [] {
@@ -233,6 +238,77 @@ int main() {
 #else
         THROWS(Error, write_default_seccomp("/tmp/never"));
 #endif
+    });
+
+    test("terminal filter: allowlist passes what TUIs need", [] {
+        auto f = [](const std::string& in) { TermFilter t; return t.feed(in); };
+        for (const char* ok : {"hello\r\n\t\033[1;31mred\033[0m", "\033[1;38;2;1;2;3mx\033[4:3mu\033[0m", "\033[?1049h\033[2J\033[H\033[?1049l",
+                               "\033[?1000;1006h\033[?2004h\033[?25l\033[?25h", "\033(0lqk\033(B", "caf\303\251 \342\202\254",
+                               "\033[6n\033[c\033[>q\033[?u\033[5 q\033[?2004$p", "\033[3;10r\033[2K\033[10;5H\033[2S\033M\0337\0338"})
+            CHECK(f(ok) == ok);
+        CHECK(f("\033]11;?\007") == "\033]11;?\033\\");
+        TermFilter split;                                              // state survives chunk boundaries
+        std::string o = split.feed("a\033]5");
+        o += split.feed("2;c;eA\007x");
+        CHECK(o == "ax");
+    });
+
+    test("terminal filter: hostile sequences are dropped", [] {
+        auto f = [](const std::string& in) { TermFilter t; return t.feed(in); };
+        CHECK(f("a\033]52;c;Zm9v\007b") == "ab");                          // OSC 52 clipboard write (BEL)
+        CHECK(f("a\033]52;c;Zm9v\033\\b") == "ab");                        // ... (ST)
+        CHECK(f("\033]8;;http://evil\033\\click\033]8;;\033\\") == "click");   // hyperlink spoofing
+        CHECK(f("\033]2;sudo password:\007") == "\033]2;[sandbox] sudo password:\033\\");
+        CHECK(f("\033]0;a\nb\033\\") == "\033]2;[sandbox] ab\033\\");      // control chars stripped from titles
+        CHECK(f("\033]4;1;rgb:00/00/00\007\033]10;rgb:00/00/00\007") == "");   // setting colours could hide text
+        CHECK(f("\033[21t\033[8;100;300t\033[22;0t") == "");               // title report (answerback injection), resize, push title
+        CHECK(f("a\033P$q\"p\033\\b") == "ab");                            // DCS
+        CHECK(f("a\033_Gf=100;AAAA\033\\b") == "ab");                      // APC (kitty graphics)
+        CHECK(f("\033Ptmux;\033\033]52;;x\007\033\\") == "");              // tmux passthrough smuggling an OSC 52
+        CHECK(f("\033c\033Z\033[?3h\033[2h\033[5i\033%@\033 G") == "");    // RIS, DECID, DECCOLM, keyboard lock, media copy, UTF-8 off, S8C1T
+        CHECK(f("a\005b") == "ab");                                        // ENQ (answerback)
+        CHECK(f("a\302\233[31mb") == "a[31mb");                            // C1 CSI (U+009B) neutralised, text stays visible
+        CHECK(f("a\233b") == "ab");                                        // raw 8-bit CSI
+        CHECK(f("\033[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;18;19;20;21;22;23;24;25;26;27;28;29;30;31;32;33;34;35;36;37;38;39;40;41;42;43;44;45;46;47;48;49;50;51;52;53;54;55;56;57;58;59;60;61;62;63;64;65m") == "");   // over-long CSI
+        std::string flood = "\033P" + std::string(70000, 'x') + "tail";   // an unterminated string must not swallow output forever
+        std::string out = f(flood);
+        CHECK(out.size() >= 4 && out.compare(out.size() - 4, 4, "tail") == 0);
+    });
+
+    test("terminal filter: restore() undoes modes a dead sandbox left on", [] {
+        TermFilter t;
+        t.feed("\033[?1049h\033[?1000h\033[?1006h\033[?25l\033[?2004h\033[?1h");
+        std::string r = t.restore();
+        for (const char* want : {"\033[?1000l", "\033[?1006l", "\033[?2004l", "\033[?1l", "\033[?25h", "\033[?1049l", "\033[0m"})
+            CHECK(r.find(want) != std::string::npos);
+        TermFilter clean;
+        clean.feed("\033[?1049h\033[?1049l\033[?25l\033[?25h");
+        CHECK(clean.restore().find("1049") == std::string::npos && clean.restore().find("25") == std::string::npos);
+    });
+
+    test("bundle sharing: layout and integrity", [] {
+        User u = fake_user();
+        Paths a = make_paths(u, "one", "alpine-dev"), b = make_paths(u, "two", "alpine-dev"), c = make_paths(u, "three");
+        CHECK(a.rootfs == b.rootfs && a.home != b.home);                       // userland shared, $HOME never
+        CHECK(c.bundle.filename() == "three");                                  // default id = profile name
+        THROWS(Error, make_paths(u, "x", "../escape"));
+        THROWS(ProfileError, parse_profile("[bundle]\nid = ../x\n", "t"));
+        const char* base = "[profile]\nname=t\ncommand=sh\n[bundle]\nalpine_version=3.24.3\n";
+        Profile p = parse_profile(base, "t");
+        Profile q = parse_profile(std::string(base) + "packages = git\nprovision = echo hi\n", "t");
+        Profile r = parse_profile("[profile]\nname=t\ncommand=sh\n[bundle]\nalpine_version=3.23.0\n", "t");
+        CHECK(bundle_spec(p) == bundle_spec(q) && bundle_spec(p) != bundle_spec(r));   // packages/provision are additive, version is not
+        char tmpl[] = "/tmp/hf-bun-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        Paths bp = a; bp.bundle = d;
+        write_file(d + "/spec.stamp", bundle_spec(p) + "\n", 0600);
+        write_file(d + "/tarball.sha256", std::string(64, 'a') + "\n", 0600);
+        bundle_verify(p, bp);                                                   // same spec: fine
+        THROWS(Error, bundle_verify(r, bp));                                    // another profile sharing the id with a different version
+        Profile pinned = parse_profile(std::string(base) + "alpine_sha256 = " + std::string(64, 'b') + "\n", "t");
+        write_file(d + "/spec.stamp", bundle_spec(pinned) + "\n", 0600);
+        THROWS(Error, bundle_verify(pinned, bp));                               // pins a different tarball than the one installed
+        fs::remove_all(d);
     });
 
     test("xauth file format", [] {
@@ -289,6 +365,10 @@ int main() {
 #ifdef HOLDFAST_HAVE_SECCOMP
         CHECK(pl.seccomp == c.session / "seccomp.bpf" && fs::exists(pl.seccomp));
 #endif
+        CHECK(has_seq(a, {"--new-session"}));                       // no pty proxy: bwrap starts a new session
+        c.pty_proxy = true;                                         // pty proxy: the sandbox's tty is the pty; a second setsid would fail
+        CHECK(!has_seq(build_plan(p, c).b.args(), {"--new-session"}));
+        c.pty_proxy = false;
         // pasta: its own resolv.conf (a host stub on 127.0.0.x would be unreachable) and a pinned uid/gid
         c.pasta = true;
         Plan pl3 = build_plan(p, c);

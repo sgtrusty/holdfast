@@ -9,6 +9,7 @@ namespace hf {
 enum class RootMode { Host, Bundle };
 enum class NetMode { None, Host, Pasta, Ivpn };
 enum class LibsMode { Minimal, Full };
+enum class TermMode { Filter, Passthrough };
 enum class DisplayMode { None, Host, Xephyr };
 enum class CwdMode { None, Ask, Yes };
 
@@ -25,7 +26,8 @@ struct Profile {
     RootMode root = RootMode::Host;
     Strings command;
     std::string hostname = "holdfast";
-    bool new_session = true;
+    bool new_session = true;       // only used when the terminal is not proxied (see `terminal`)
+    TermMode terminal = TermMode::Filter;   // pty proxy that strips dangerous escape sequences
     bool disable_userns = true;
     std::string seccomp = "default";   // "default" (built-in filter) | "none" | path to a compiled BPF file
     CwdMode cwd = CwdMode::Ask;
@@ -73,6 +75,7 @@ struct Profile {
     Strings font_families;
 
     // [bundle]
+    std::string bundle_id;         // shared userland identity; empty => the profile name
     std::string alpine_version = "latest-stable";
     std::string alpine_mirror = "https://dl-cdn.alpinelinux.org/alpine";
     std::string alpine_sha256;     // optional pin of the minirootfs tarball

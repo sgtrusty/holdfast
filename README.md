@@ -110,14 +110,14 @@ direct veth path is blocked, traffic dies when the wg interface is down, policy 
 ## Safety notes (read these)
 
 - `audio = pulse` exposes the **microphone** to every process in the sandbox.
-- `new_session = yes` (default) prevents TIOCSTI keystroke injection, but also means the terminal's Ctrl-C reaches **holdfast**, not programs inside. Use it for editors/GUIs; set `no` for interactive shells you trust more (and run them in tmux).
+- `terminal = filter` (default): the sandbox runs on its own pty and its output is filtered, so it cannot write your clipboard (OSC 52), forge titles/hyperlinks, or make your terminal type replies into your shell. TTY programs get a real controlling terminal and Ctrl-C works. `terminal = passthrough` falls back to `new_session` (blocks TIOCSTI, but Ctrl-C then reaches holdfast, not the program).
 - `[clipboard] mode = out` lets the sandbox *set* your host clipboard (not read it).
 - The `.git` guard protects history/hooks of repos that exist at launch. It does not stop the sandbox from writing a hostile `Makefile`/`.envrc`/IDE task that *you* later run outside.
 - Bundle provisioning runs **with network** and trusts the packages/commands in your profile.
 - The Alpine hash comes from the same mirror as the tarball (integrity, not authenticity). Pin `alpine_sha256` for real supply-chain assurance.
 - bwrap is not a VM: kernel bugs reachable through the syscall surface apply. A default seccomp denylist (`bpf`, `io_uring`, `mount`, `keyctl`, `userfaultfd`, `TIOCSTI`, ...) is on unless the profile says `seccomp = none` or supplies its own `.bpf`; it is a denylist, not a full syscall allowlist.
 
-See `docs/THREAT_MODEL.md` for scope and `docs/SPEC.md` for the technical design.
+See `docs/THREAT_MODEL.md` for scope, `docs/SPEC.md` for the technical design and `docs/DEFERRED.md` for known limitations and untested areas.
 
 ## Exit codes
 `0` ok · `1` error · `2` usage · `3` refused by policy · `70` internal · otherwise the sandboxed command's exit code (`128+n` if killed by signal `n`).

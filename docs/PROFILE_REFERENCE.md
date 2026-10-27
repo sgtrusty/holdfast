@@ -13,7 +13,8 @@ Mount syntax: `SRC` or `SRC => DEST` (DEST defaults to SRC). Globs (`* ? [..]`) 
 | mode | `host` | `host` (whitelist host binaries/libs) or `bundle` (private Alpine) |
 | command | | argv, shell-style quoting; replaced by `-- CMD…` on the CLI |
 | hostname | `holdfast` | UTS hostname inside |
-| new_session | `yes` | `bwrap --new-session` (blocks TIOCSTI; Ctrl-C then hits holdfast, not the inner program) |
+| terminal | `filter` | `filter`: when stdin/stdout are terminals the program runs on a fresh pty (its own controlling tty) and everything it prints is filtered, see "Terminal filter" below. `passthrough`: the sandbox writes straight to your terminal (not recommended). |
+| new_session | `yes` | `bwrap --new-session`. Only used when the terminal is NOT proxied (`terminal = passthrough`, or stdio is not a tty). It blocks TIOCSTI, but Ctrl-C then hits holdfast and `/dev/tty` is unavailable. With `terminal = filter` it is unnecessary. |
 | disable_userns | `yes` | `--disable-userns` when bwrap ≥ 0.8 |
 | seccomp | `default` | `default` (built-in libseccomp filter, see below) · `none` (no filter, warns) · path to a compiled BPF file. A build without libseccomp refuses `default`. |
 | cwd | `ask` | `none` / `ask` (tty prompt) / `yes`; mounts the current dir at `cwd_dest` |
@@ -60,6 +61,18 @@ network namespace and therefore those sockets: prefer `pasta`. The LAN is reacha
 legacy x86 calls (`modify_ldt`, `iopl`, ...), plus the `TIOCSTI`/`TIOCLINUX` ioctls. `clone`, `clone3`, `unshare`,
 `setns` and `ptrace` stay allowed (browsers, nested sandboxes, debuggers). Foreign-ABI syscalls are killed.
 
+### Terminal filter
+A terminal is programmable: bytes a program prints can set your clipboard (OSC 52), forge titles and hyperlinks, make the
+terminal type replies into your shell (title/answerback reports) and leave mouse reporting on after a crash.
+With `terminal = filter` the sandbox runs on a pty and its output goes through an allowlist parser. Passed: text, UTF-8,
+colours (SGR), cursor movement, erase/scroll, alternate screen, mouse/focus/bracketed-paste/sync modes, safe queries
+(DA, cursor position, XTVERSION, DECRQM, kitty keyboard, fg/bg colour query), charset designation, window titles
+(sanitised and prefixed `[sandbox]`). Dropped: all other OSC (52 clipboard, 8 hyperlinks, 7, 9, 99, 777, 1337, colour
+setting, ...), DCS/APC/PM/SOS (sixel, kitty graphics, tmux passthrough), XTWINOPS (`CSI t`: title reports, resize, move),
+RIS, keyboard lock, media copy, 8-bit/C1 controls, ENQ and other C0 controls. When the sandbox ends, modes it left on are reset.
+Not covered: what the program *draws* (it can still print misleading text), and bidi overrides in terminal output.
+Input is relayed byte for byte. If the terminal ever stays raw after a hard kill of holdfast itself, run `reset`.
+
 ## [display]
 `mode = none|xephyr|host` · `size = WxH` · `wm = <shell snippet started in background before the command>` ·
 `xauth = yes|no` (xephyr cookie) · `allow_host_x11 = yes` (required for `mode=host`).
@@ -72,7 +85,8 @@ legacy x86 calls (`modify_ldt`, `iopl`, ...), plus the `TIOCSTI`/`TIOCLINUX` ioc
 ## [bundle]
 | key | default | |
 |---|---|---|
-| alpine_version | `latest-stable` | e.g. `v3.21` |
+| id | profile name | shared userland identity (`[a-z0-9._-]`, ≤ 64). Profiles with the same id use one rootfs under `<data>/bundles/<id>`; the fake `$HOME` stays per profile. Setup and `run` verify that the installed bundle was built from this profile's `alpine_version`+`alpine_mirror`+`alpine_sha256` (and the pinned tarball) and fail otherwise. `packages` are additive across profiles; `provision` lines run with the shared rootfs writable, so keep them to `$HOME`. |
+| alpine_version | `latest-stable` | exact release (`3.24.3`: fetched by name, reproducible) or a moving alias (`v3.24`, `latest-stable`, `edge`: warns). Pin an exact release plus `alpine_sha256`. |
 | alpine_mirror | `https://dl-cdn.alpinelinux.org/alpine` | HTTPS only |
 | alpine_sha256 | | pin the tarball hash (also enables offline reuse of the cache) |
 | packages | | `apk add` list (repeatable) |

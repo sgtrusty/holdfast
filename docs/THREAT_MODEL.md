@@ -12,7 +12,8 @@ plugin) running as your uid, able to execute arbitrary code *inside* the sandbox
 | Mount `$HOME`, `/`, media roots by accident/trick | Sensitive-root + ancestor-exposure rules, exit 3 | |
 | Run host binaries / find setuid helpers | Only whitelisted binaries exist; `--cap-drop ALL`; nested userns disabled (bwrap ≥ 0.8) | Allowed binaries and libs are real host code |
 | Tamper with git history/hooks | `.git` entries re-bound read-only, un-renameable | Repos created *after* launch; hostile build files you later execute |
-| Keystroke injection to the launching tty (TIOCSTI) | `--new-session` | Disabled by `new_session = no` |
+| Keystroke injection to the launching tty (TIOCSTI) | The sandbox gets its own pty as controlling terminal (`terminal = filter`, default); seccomp blocks `TIOCSTI`/`TIOCLINUX`; `--new-session` when not proxied | `terminal = passthrough` with `new_session = no` |
+| Terminal escape sequences: clipboard write (OSC 52), title/hyperlink spoofing, reply injection (title reports), modes left on | Output filtered through an allowlist parser; modes reset on exit (see PROFILE_REFERENCE "Terminal filter") | Misleading *text* the program draws; bidi controls; `terminal = passthrough`; replies to allowed queries that arrive after exit |
 | Network exfiltration | Default fresh empty netns | `host`/`ivpn` give network by design |
 | IP / DNS leak when VPN drops | Default-DROP firewall armed before tunnel, endpoint-only host NAT, tunnel DNS, IPv6 policy DROP | Needs correct host `iptables`; nft-only hosts rely on the iptables-nft shim; Docker's FORWARD chain ordering is handled by inserting at position 1 |
 | Privilege escalation via VPN config | `PostUp`/hooks rejected; config copied; names validated before `rm -rf` | You still run wg-quick as root on a config you chose |

@@ -7,13 +7,17 @@
 
 namespace hf {
 
-Paths make_paths(const User& u, const std::string& name) {
+Paths make_paths(const User& u, const std::string& name, const std::string& bundle_id) {
+    const std::string id = bundle_id.empty() ? name : bundle_id;
+    if (id.empty() || id.find('/') != std::string::npos || id == "." || id == "..")
+        throw Error("invalid bundle id: " + id);
     Paths p;
     if (const char* e = std::getenv("HOLDFAST_HOME"); e && *e) p.data = e;
     else p.data = u.home / ".local/share/holdfast";
     p.cache = p.data / "cache";
     p.state = p.data / "profiles" / name;
-    p.rootfs = p.state / "rootfs";
+    p.bundle = p.data / "bundles" / id;
+    p.rootfs = p.bundle / "rootfs";
     p.home = p.state / "home";
     // Never a shared /tmp path: without a per-user runtime dir, stay inside the user's own data dir.
     p.run_root = fs::exists(u.runtime_dir) ? u.runtime_dir / "holdfast" : p.data / "run";
