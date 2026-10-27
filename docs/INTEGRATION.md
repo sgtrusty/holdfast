@@ -77,7 +77,7 @@ Reference: `docs/PROFILE_REFERENCE.md`. Concepts: `docs/CONCEPTS.md`.
   root for the network namespace and uses `sudo` itself (`docs/NETWORK.md`); do not add `sudo` for anything else.
 - Do not weaken a profile to make something work: leave `seccomp`, `terminal`, `[git] protect`, `cwd` and the network at
   their defaults unless the user explicitly asked, and say so when you change one.
-- Profiles are trusted code (`provision` and `wm` lines are shell). Read a profile before running it; never generate
+- Profiles and `data/dep` recipes are trusted code (`wm` and recipe `run` lines are shell). Read a profile before running it; never generate
   one from untrusted input.
 - A denied path (exit `3`) is the policy working. Mount a more specific subdirectory instead of `$HOME` or a credentials
   directory.

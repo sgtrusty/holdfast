@@ -83,13 +83,16 @@ Input is relayed byte for byte. If the terminal ever stays raw after a hard kill
 ## [git]  `protect = yes|no` – re-bind every `.git` read-only under the mounted tree.
 ## [fonts]  `allow = family …` – substring match on font file paths; only these are visible.
 
-## [bundle]
-| key | |
-|---|---|
-| provision | one shell line per key, run once in the writable stage with network; do not use ` #` inside. Runs with the shared rootfs writable, so keep it to `$HOME`. |
+## [deps]  (bundle mode)
+`use = name …` (repeatable) – the `data/dep/NAME.profile` install recipes for this profile, run in this order. Each recipe runs
+once as an ordinary run of this profile (its userland read-only, its `$HOME`, your uid, its seccomp and terminal filter) with
+only the network and the command taken from the recipe, and is stamped on its own: a newly added dep installs on the next run;
+an edited recipe is refused until `holdfast run --refresh PROFILE` runs the recipes again. The recipe's `os` must equal this
+profile's. A host-mode profile cannot use deps. Format, the exact list of overrides and `needs`: `docs/DATA.md`.
 
-The userland itself (`alpine_version`, `alpine_mirror`, `alpine_sha256`, `packages`) is **not** a profile setting any more.
-It lives once in `data/os/NAME.profile` (`kind = bundle`) and profiles say `os = NAME`; every profile naming the same file shares
-one rootfs under `<data>/bundles/NAME`. There is no setup command: the first `run` creates it (inside sandboxes) and later runs
-verify it was built from the current file; `holdfast run --refresh PROFILE` rebuilds it. Old inline keys in `[bundle]` are
-errors that point here. See `docs/DATA.md`.
+## Bundle mode: where the rest went
+There is no `[bundle]` section any more. The inline `provision` lines became `data/dep` recipes (`[deps] use`), and the userland
+itself (`alpine_version`, `alpine_mirror`, `alpine_sha256`, `packages`) lives once in `data/os/NAME.profile` (`kind = bundle`);
+profiles say `os = NAME`. Every profile naming the same file shares one rootfs under `<data>/bundles/NAME`. There is no setup
+command: the first `run` creates it (inside sandboxes) and later runs verify it was built from the current file;
+`holdfast run --refresh PROFILE` rebuilds it if its definition changed. The old keys are errors that point here.

@@ -9,7 +9,8 @@ struct RunOptions {
     bool dry = false;                   // print the plan, change nothing
     bool yes = false;                   // answer "yes" to the cwd prompt
     bool no_cwd = false;
-    bool refresh = false;               // bundle profiles: rebuild the userland from its data/os definition first
+    bool refresh = false;               // bundle profiles: redo a changed userland / the dep recipes first
+    bool userland_ready = false;        // the caller (bundle_ensure running a dep) already prepared the userland: do not recurse
     std::optional<fs::path> cwd;
     std::optional<NetMode> net;
     std::optional<std::string> wg_conf;

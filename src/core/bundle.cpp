@@ -3,6 +3,7 @@
 #include "core/datadefs.hpp"
 #include "core/plan.hpp"
 #include "core/seccomp.hpp"
+#include "core/session.hpp"
 #include "util/log.hpp"
 
 namespace hf {
@@ -13,14 +14,12 @@ std::string alpine_arch() {
     throw Error("unsupported architecture for the Alpine bundle: " + a);
 }
 
-std::string provision_stamp(const Profile& p) {
-    return sha256_str(cat(p.alpine_version, "|", p.alpine_mirror, "|", p.alpine_sha256, "|",
-                          join(p.apk_packages, " "), "|", join(p.provision, "\n")));
-}
+// A dep is installed into the profile's persistent $HOME, so its stamp depends on the recipe and on that home's path.
+std::string dep_stamp(const Profile& p, const DepRecipe& d) { return sha256_str(cat(d.digest, "|", p.fake_user)); }
 
-// Everything the OS file declares (version, mirror, pinned hash, packages). Provision lines are per profile
-// and are not part of it. All profiles naming the same os read the same file, so a mismatch means the file
-// changed after the bundle was built (or two data directories define the same os name differently).
+// Everything the OS file declares (version, mirror, pinned hash, packages). Deps are per profile and are not part of
+// it. All profiles naming the same os read the same file, so a mismatch means the file changed after the bundle was
+// built (or two data directories define the same os name differently).
 std::string bundle_spec(const Profile& p) {
     return sha256_str(cat(p.alpine_version, "|", p.alpine_mirror, "|", p.alpine_sha256, "|", join(p.apk_packages, " ")));
 }
@@ -42,12 +41,12 @@ void bundle_verify(const Profile& p, const Paths& paths) {
 
 bool bundle_installed(const Paths& paths) { return fs::exists(paths.rootfs / "bin/busybox") || fs::exists(paths.rootfs / "bin/sh"); }
 
-bool bundle_provisioned(const Profile& p, const Paths& paths) {
-    try { return trim(read_file(paths.state / "provision.stamp")) == provision_stamp(p); }
-    catch (...) { return false; }
-}
-
 namespace {
+
+std::string read_stamp(const fs::path& f) {
+    try { return trim(read_file(f)); } catch (...) { return ""; }
+}
+fs::path dep_stamp_path(const Paths& paths, const DepRecipe& d) { return paths.state / "deps" / (d.name + ".stamp"); }
 
 // Runs in the bootstrap sandbox. Constant text: all data arrives through HF_* environment variables, never by
 // interpolation. /cache holds downloaded tarballs, /work is the bundle directory.
@@ -150,49 +149,99 @@ ArgBuilder writable_args(const Profile& p, const Paths& paths, const fs::path& s
     return b;
 }
 
-// apk add + the profile's provision lines, in a writable sandbox with network through pasta.
-void provision(const Profile& p, const User& u, const Paths& paths, const fs::path& session) {
-    std::string script = "set -e\n";
-    if (!p.apk_packages.empty()) {
-        script += "apk update\napk add --no-cache";
-        for (auto& pk : p.apk_packages) script += " " + shell_quote(pk);
-        script += "\n";
-    }
-    for (auto& l : p.provision) script += l + "\n";
-
-    log::warn("provisioning runs WITH network (via pasta, a private namespace) inside the userland (as userns-root); only your profile's lines execute");
+// The ONE step that is not an ordinary profile run: `apk add` for the os packages. A package manager must own the whole
+// userland, so this sandbox is deliberately different and says so: the rootfs is bound WRITABLE at /, `--uid 0` makes it
+// userns-root (your uid mapped to 0, no real privilege), and the network is pasta's private namespace. Deps do not
+// use this; they run as the profile itself (see dep_profile).
+void install_os_packages(const Profile& p, const User& u, const Paths& paths, const fs::path& session) {
+    std::string script = "set -e\napk update\napk add --no-cache";
+    for (auto& pk : p.apk_packages) script += " " + shell_quote(pk);
+    log::info(cat("installing the os packages with apk: writable rootfs, userns-root, network via pasta (data/os/", p.os, ".profile)"));
     ArgBuilder b = writable_args(p, paths, session);
-    b.command({"/bin/sh", "-c", script});
+    b.command({"/bin/sh", "-c", script + "\n"});
     const int rc = run_sandbox(as_user(u, pasta_argv(find_pasta(), launcher_argv(find_bwrap(), session, b, ""))), p.terminal == TermMode::Filter);
-    if (rc != 0) throw Error(cat("provisioning failed (exit ", rc, "); fix the profile (or data/os/", p.os, ".profile) and run it again"));
-    write_file(paths.state / "provision.stamp", provision_stamp(p) + "\n", 0600);
+    if (rc != 0) throw Error(cat("installing the os packages failed (exit ", rc, "); see the messages above and check data/os/", p.os, ".profile"));
+}
+
+void install_dep(const Profile& p, const DepRecipe& d) {
+    // The recipe's own tools are checked first, so a missing `go` is one clear sentence instead of a half-run build.
+    std::string script = "set -e\n";
+    for (const auto& n : d.needs)
+        script += cat("command -v ", shell_quote(n), " >/dev/null 2>&1 || { echo ",
+                      shell_quote(cat("dep '", d.name, "' needs '", n, "' in the userland: add its package to data/os/", p.os, ".profile")),
+                      " >&2; exit 5; }\n");
+    for (const auto& l : d.run) script += l + "\n";
+
+    RunOptions ro;
+    ro.no_cwd = true;
+    ro.yes = true;
+    ro.userland_ready = true;                                      // the userland and its packages are already in place
+    ro.command = {"/bin/sh", "-c", script};
+    log::info(cat("dep '", d.name, "': an ordinary run of '", p.name, "' with network=", d.net == NetMode::Pasta ? "pasta" : "none",
+                  " and this recipe as the command"));
+    const int rc = run_profile(dep_profile(p, d), ro);
+    if (rc != 0) throw Error(cat("dep '", d.name, "' failed (exit ", rc, "); see the messages above, fix data/dep/", d.name, ".profile and run again"));
 }
 
 }  // namespace
 
+Profile dep_profile(const Profile& p, const DepRecipe& d) {
+    Profile r = p;
+    r.net = d.net;
+    r.cwd = CwdMode::None;
+    r.display = DisplayMode::None;
+    r.wm.clear();
+    r.audio = false;
+    r.clipboard_out = false;
+    r.dep_use.clear();
+    r.deps.clear();
+    return r;
+}
+
 void bundle_ensure(const Profile& p, const User& u, const Paths& paths, bool refresh, bool dry) {
     const bool installed = bundle_installed(paths);
-    if (dry) {                                                     // print / check never download anything
+    if (dry) {                                                     // print / check never download or install anything
         if (!installed)
             throw Error(cat("the Alpine userland for '", p.name, "' is not set up yet; run the profile once (holdfast run ", p.name, ") and it is created"));
         bundle_verify(p, paths);
         return;
     }
-    if (installed && !refresh) {
-        bundle_verify(p, paths);                                   // a changed definition is an error, never a silent rebuild
-        if (bundle_provisioned(p, paths)) return;                  // the common case: nothing to do
+
+    // Decide what is out of date before creating anything. A changed definition is an error unless --refresh.
+    bool rebuild = !installed;
+    if (installed) {
+        try { bundle_verify(p, paths); }
+        catch (const Error&) { if (!refresh) throw; rebuild = true; }
     }
+    const bool packages_due = rebuild || read_stamp(paths.bundle / "packages.stamp") != bundle_spec(p);
+    std::vector<const DepRecipe*> due;
+    for (const auto& d : p.deps) {
+        const std::string have = read_stamp(dep_stamp_path(paths, d));
+        if (refresh || have.empty()) { due.push_back(&d); continue; }
+        if (have != dep_stamp(p, d))
+            throw Error(cat("dep '", d.name, "' changed since it was installed into '", p.name, "'; reinstall with: holdfast run --refresh ",
+                            p.name, " (its commands run again)"));
+    }
+    if (!rebuild && !packages_due && due.empty()) return;          // the common case: nothing to do
 
     make_private_dir(paths.state);
     struct Scratch { fs::path d; ~Scratch() { std::error_code ec; fs::remove_all(d, ec); } } sc{make_session_dir(u, paths, p.name + "-setup")};
-    if (refresh || !installed) {
-        log::info(installed ? "rebuilding the Alpine userland (--refresh)" : "first run: setting up the Alpine userland");
+    if (rebuild) {
+        log::info(installed ? "rebuilding the Alpine userland (its definition changed)" : "first run: setting up the Alpine userland");
         fetch_and_extract(p, u, paths, sc.d);
         write_file(paths.bundle / "spec.stamp", bundle_spec(p) + "\n", 0600);
         std::error_code ec;
-        fs::remove(paths.state / "provision.stamp", ec);           // a fresh rootfs has none of the packages or provisioned files
+        fs::remove(paths.bundle / "packages.stamp", ec);           // a fresh rootfs has none of the packages
     }
-    provision(p, u, paths, sc.d);
+    if (packages_due) {
+        if (!p.apk_packages.empty()) install_os_packages(p, u, paths, sc.d);
+        write_file(paths.bundle / "packages.stamp", bundle_spec(p) + "\n", 0600);
+    }
+    for (const DepRecipe* d : due) {
+        install_dep(p, *d);
+        make_private_dir(paths.state / "deps");
+        write_file(dep_stamp_path(paths, *d), dep_stamp(p, *d) + "\n", 0600);
+    }
     log::info("userland ready: " + paths.rootfs.string());
 }
 

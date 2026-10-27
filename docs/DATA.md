@@ -1,17 +1,19 @@
-# Data files: `data/profile`, `data/lib`, `data/os`
+# Data files: `data/profile`, `data/lib`, `data/os`, `data/dep`
 
-Profiles say **what** a sandbox needs. Two other kinds of file say **where** it lives and **what an OS setup is**,
-so that nothing host-specific is copied into profiles and nothing is declared twice.
+Profiles say **what** a sandbox needs. Three other kinds of file say **where** it lives, **what an OS setup is** and **how
+an extra tool gets installed**, so that nothing host-specific is copied into profiles and nothing is declared twice.
 
 ```
 data/
-  profile/NAME.profile   intent: mounts, network, display, [bin] allow, [libs] use, [profile] os
+  profile/NAME.profile   intent: mounts, network, display, [bin] allow, [libs] use, [deps] use, [profile] os
   lib/NAME.profile       what one tool/library family needs (hand-written, distro-neutral)
   os/NAME.profile        one OS setup: a bundle's pinned Alpine + packages, or a host distro's resolved library files
+  dep/NAME.profile       one install step for a bundle profile (build or fetch a tool into its $HOME)
 ```
 
 Every file is a `.profile` in the same INI-style syntax (TOML is a roadmap item; the files will be converted, not
-redesigned). The **directory** says what a file describes: a sandbox (`profile/`), a tool (`lib/`) or an OS setup (`os/`).
+redesigned). The **directory** says what a file describes: a sandbox (`profile/`), a tool (`lib/`), an OS setup (`os/`) or
+an install step (`dep/`).
 Names are `[a-z0-9][a-z0-9._-]{0,63}` and become file names.
 
 ## The per-OS file list (plain words)
@@ -62,8 +64,8 @@ alpine_sha256  = f8e1caf...        # pin the tarball (strongly recommended; with
 packages = ca-certificates build-base git bash curl go rust cargo
 ```
 
-Every profile with `[profile] os = NAME` shares `<data>/bundles/NAME/rootfs`; the fake `$HOME` stays per profile and
-`provision` lines stay in the profile. The first `holdfast run` of any of them creates the userland (inside sandboxes), and
+Every profile with `[profile] os = NAME` shares `<data>/bundles/NAME/rootfs`; the fake `$HOME` and the deps installed into
+it stay per profile. The first `holdfast run` of any of them creates the userland (inside sandboxes), and
 each later run verifies it was built from this file's current version/mirror/sha256/packages, refusing otherwise. After
 editing the file, `holdfast run --refresh PROFILE` rebuilds it for every profile sharing it (changes made inside are discarded).
 
@@ -89,6 +91,54 @@ holdfast libs                                          # print instead of saving
 
 `holdfast libs` reads ELF headers of every lib's commands and sonames on THIS host (nothing is executed) and keeps the
 `[files.*]` sections of other architectures already in the file.
+
+## `data/dep/NAME.profile`
+
+An install step for a **bundle** profile: a tool you want in its userland that the package list does not give you (a
+branch built from source, a single script, a plugin). It replaces the old inline `provision` lines.
+
+```ini
+[dep]
+description = lazygit (sh-integration branch), built with Go
+os = alpine-3.24-dev                # the userland it is built for; the profile using it must name the same os
+needs = go                          # commands that must already exist in the userland; add their package to the data/os file
+[network]
+mode = pasta                        # none (the default) | pasta
+[install]
+run = go install github.com/jesseduffield/lazygit@sh-integration      # one shell line per `run`, in order
+```
+
+A profile opts in with `[deps] use = lazygit delta ...`. A dep is **an ordinary run of that profile**, produced by the same
+code that runs it day to day, so nothing about the sandbox is special-cased for installs:
+
+| | where it comes from |
+|---|---|
+| userland | the profile's `os`, mounted **read-only** like every other run (installs go to `$HOME`, not into the userland) |
+| identity, `$HOME` | the profile's: your uid (not root), the fake user's persistent home |
+| seccomp, terminal filter, `[home]`, `[env]`, `hostname` | the profile's |
+| network | **the recipe**: `[network] mode`, `none` if it says nothing (the profile's own network is not inherited) |
+| command | **the recipe**: its `run` lines, after the `needs` check |
+| working tree, display, audio, clipboard, `wm`, nested deps | switched off: an install step needs none of them |
+
+The last two rows are the complete list of differences (`dep_profile()` in `src/core/bundle.cpp`, covered by a test).
+`[dep] os` is required and must equal the profile's: a tool built on Alpine (musl) will not run on another userland.
+
+What happens, per dep:
+
+- Install into `$HOME` (`go install` already does; `cargo install --root "$HOME/go"`). The userland is read-only for a dep,
+  so anything written elsewhere simply fails instead of silently landing in the shared rootfs.
+- `needs` is checked first, inside the userland, so a missing `go` is one clear sentence instead of a half-run build.
+- Each dep has its own stamp (`<data>/profiles/<name>/deps/<dep>.stamp`, a hash of the recipe, including its os and network, plus the home path). A dep you
+  add later installs on the next run; an edited recipe is refused until `holdfast run --refresh PROFILE`, which runs the
+  recipes again. Delete a stamp, or the folder, to force one.
+- Recipes are trusted shell like any profile's `wm` line: read one before you use it. Deps are only for bundle mode.
+
+`holdfast list deps` shows what is available.
+
+**The one special step is not a dep:** installing the `data/os` file's `packages` with `apk add`. A package manager must own
+the whole userland, so that sandbox is deliberately different: the rootfs is writable, `--uid 0` makes it userns-root (your
+uid mapped to 0, no real privilege), and the network is pasta's. holdfast says so when it runs; it lives in
+`install_os_packages()` in `src/core/bundle.cpp`.
 
 ## How a minimal profile resolves (run time, no ELF parsing)
 

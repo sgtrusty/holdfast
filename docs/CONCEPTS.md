@@ -20,9 +20,11 @@ where it came from; to customise one, copy its file into `~/.config/holdfast/pro
   shared by every profile that names the same `os`. There is no setup command: the first `holdfast run` creates it.
   Everything that touches the downloaded bytes runs inside sandboxes (no host process handles the tarball): a throwaway
   network-restricted sandbox downloads it over HTTPS, checks the sha256 (pin it in the `data/os` file) and extracts it,
-  then a second one runs `apk add` and your `provision` lines. Day-to-day runs mount it read-only.
+  then another runs `apk add` for the os packages (the one step that needs a writable userland and userns-root), and each
+  `[deps] use` recipe (`data/dep`) runs as an ordinary run of the profile itself, with the recipe's own network, to install
+  extra tools into its persistent `$HOME`. Day-to-day runs mount the userland read-only.
   Changing the `data/os` file makes the next run refuse until you `holdfast run --refresh PROFILE` (rebuild; changes made
-  inside the userland are discarded). It is all plain folders: `holdfast doctor` prints the data directory; to remove a
+  inside the userland are discarded); an edited dep recipe is refused the same way and re-run by `--refresh`. It is all plain folders: `holdfast doctor` prints the data directory; to remove a
   userland or a profile's saved `$HOME`, delete its folder (`bundles/<os>/`, `profiles/<name>/`).
 
 ## Network

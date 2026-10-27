@@ -22,7 +22,7 @@ The build is described in `premake5.lua`; `predep.toml` declares the `build`/`te
 /`clean` stages. The output binary lands at `bin/holdfast` (unit-test binary at `bin/holdfast_tests`).
 
 ## Invariants — do not break these
-1. **No shell strings.** Run programs with `hf::run/capture/spawn` (argv vectors). The only `/bin/sh` use is the constant trampoline in `core/launch.cpp`; never interpolate data into it. (`provision`/`wm` lines are *profile-author* shell by design.)
+1. **No shell strings.** Run programs with `hf::run/capture/spawn` (argv vectors). The only `/bin/sh` use is the constant trampoline in `core/launch.cpp`; never interpolate data into it. (`wm` lines and `data/dep` recipe `run` lines are *profile-author* shell by design.)
 2. **Every host path that enters the sandbox from user/profile input goes through `Policy::check_bind`** and is bound by its *canonical* path. Adding a new mount source ⇒ add the policy call and a test in `tests/test_main.cpp`.
 3. **Fail closed.** Unknown profile key/section/variable, missing bundle, bad WireGuard directive ⇒ throw (`ProfileError`/`Error`/`PolicyError`). Never downgrade an error to a warning to "make it work".
 4. **Defaults are restrictive**: network `none`, display `none`, audio `none`, clipboard `none`, `.git` protected, `--cap-drop ALL`, `--clearenv`. A new capability must be opt-in per profile and carry a warning if it widens exposure.
@@ -43,7 +43,8 @@ The build is described in `premake5.lua`; `predep.toml` declares the `build`/`te
 | New command or CLI option | help text and `parse_args` in `src/cli/args.cpp` (keep the help columns aligned) → dispatch in `src/main.cpp` → case in the `cli: option parsing` test |
 | New helper binary | add to `doctor()`; check with `which()` and give an actionable error |
 | New tool a minimal-libs profile can use | `data/lib/NAME.profile` (commands, sonames, paths, needs) → `holdfast libs --refresh` on each supported OS → commit the changed `data/os/*.profile`. No C++ change. |
-| New OS setup (bundle packages / pinned release, or a host distro lock) | `data/os/NAME.profile`; never inline version/packages in a profile. See `docs/DATA.md`. |
+| New install step for a bundle profile (a tool built/fetched into its `$HOME`) | `data/dep/NAME.profile` (`needs` + `run` lines; install into `$HOME`) → list it under the profile's `[deps] use`. No C++ change. |
+| New OS setup (bundle packages / pinned release, or a host distro file list) | `data/os/NAME.profile`; never inline version/packages in a profile. See `docs/DATA.md`. |
 | New key in a data file | `datadefs.cpp` (strict parse + `render_os` if it is written back) → `docs/DATA.md` → parser test |
 
 ## Testing netns changes without a VPN

@@ -54,13 +54,16 @@ int main() {
 
     test("profile parser", [] {
         Profile p = parse_profile("[profile]\nname=x\ncommand = a 'b c'  # trailing\nmode=bundle\n[fs]\nro_try = /a => /b\nrw = $HOME/p\n"
-                                  "[env]\nset = K=V=W\n[network]\nmode=ivpn\nsubnet=7\n[bundle]\nprovision = echo a#b\n", "t");
+                                  "[env]\nset = K=V=W\n[network]\nmode=ivpn\nsubnet=7\n[deps]\nuse = a b\nuse = c\n", "t");
         CHECK(p.root == RootMode::Bundle);
         CHECK((p.command == Strings{"a", "b c"}));
         CHECK(p.mounts.size() == 2 && p.mounts[0].optional && !p.mounts[0].rw && p.mounts[0].dst == "/b" && p.mounts[1].rw);
         CHECK(p.env_set.at(0).second == "V=W");
         CHECK(p.net == NetMode::Ivpn && p.subnet_octet == 7);
-        CHECK(p.provision.at(0) == "echo a#b");
+        CHECK((p.dep_use == Strings{"a", "b", "c"}));
+        THROWS(ProfileError, parse_profile("[bundle]\nprovision = echo a\n", "t"));        // install steps live in data/dep now
+        THROWS(ProfileError, parse_profile("[deps]\nuse = ../evil\n", "t"));
+        THROWS(ProfileError, parse_profile("[deps]\nbogus = x\n", "t"));
         THROWS(ProfileError, parse_profile("[profile]\nbogus=1\n", "t"));
         THROWS(ProfileError, parse_profile("[nope]\na=1\n", "t"));
         THROWS(ProfileError, parse_profile("a=1\n", "t"));
@@ -325,6 +328,9 @@ int main() {
             write_file(d + "/os/alpine-x.profile",
                        "[os]\nkind = bundle\nalpine_version = 3.24.3\nalpine_sha256 = " + std::string(64, 'a') + "\npackages = git curl\n", 0644);
             write_file(d + "/os/alpine-y.profile", "[os]\nkind = bundle\nalpine_version = 3.23.0\npackages = git curl\n", 0644);
+            fs::create_directories(d + "/dep");
+            write_file(d + "/dep/hello.profile", "[dep]\ndescription = says hello\nos = alpine-x\nneeds = sh\n[install]\nrun = echo hello > \"$HOME/hello\"\n", 0644);
+            write_file(d + "/dep/wrongos.profile", "[dep]\nos = alpine-y\n[install]\nrun = true\n", 0644);
         }
         ~DataRoot() { std::error_code ec; fs::remove_all(d, ec); }
     };
@@ -340,6 +346,24 @@ int main() {
         THROWS(ProfileError, parse_os("[os]\nkind = host\nid = a\nalpine_version = 3\n", "t", "x"));
         THROWS(ProfileError, parse_os("[os]\nkind = host\nid = a\n[files.x86_64.b]\nbind = rel\n", "t", "x"));
         THROWS(ProfileError, parse_os("[os]\nkind = bundle\nalpine_sha256 = zz\n", "t", "x"));
+        DepRecipe dr = parse_dep("[dep]\nos = alp\ndescription = d\nneeds = go git\n[install]\nrun = a\nrun = b $HOME\n", "t", "x");
+        CHECK((dr.needs == Strings{"go", "git"}) && (dr.run == Strings{"a", "b $HOME"}) && !dr.digest.empty());
+        CHECK(dr.os == "alp" && dr.net == NetMode::None);                                  // restrictive default: no network unless declared
+        const std::string base = "[dep]\nos = alp\n";
+        CHECK(parse_dep(base + "[install]\nrun = a\n", "t", "x").digest != parse_dep(base + "[install]\nrun = b\n", "t", "x").digest);   // edits are detectable
+        CHECK(parse_dep(base + "needs = go\n[install]\nrun = a\n", "t", "x").digest != parse_dep(base + "[install]\nrun = a\n", "t", "x").digest);
+        CHECK(parse_dep(base + "[network]\nmode = pasta\n[install]\nrun = a\n", "t", "x").net == NetMode::Pasta);
+        CHECK(parse_dep(base + "[network]\nmode = pasta\n[install]\nrun = a\n", "t", "x").digest != parse_dep(base + "[install]\nrun = a\n", "t", "x").digest);
+        CHECK(parse_dep("[dep]\nos = other\n[install]\nrun = a\n", "t", "x").digest != parse_dep(base + "[install]\nrun = a\n", "t", "x").digest);
+        THROWS(ProfileError, parse_dep("[install]\nrun = a\n", "t", "x"));                  // os is required: musl vs glibc matters
+        THROWS(ProfileError, parse_dep(base + "description = nothing to run\n", "t", "x"));
+        THROWS(ProfileError, parse_dep(base + "[install]\nbogus = a\n", "t", "x"));
+        THROWS(ProfileError, parse_dep(base + "needs = ../x\n[install]\nrun = a\n", "t", "x"));
+        THROWS(ProfileError, parse_dep(base + "[install]\nrun = a\n[other]\nk = v\n", "t", "x"));
+        THROWS(ProfileError, parse_dep(base + "name = other\n[install]\nrun = a\n", "t", "x"));
+        THROWS(ProfileError, parse_dep(base + "[network]\nmode = host\n[install]\nrun = a\n", "t", "x"));   // host shares abstract sockets
+        THROWS(ProfileError, parse_dep(base + "[network]\nmode = ivpn\n[install]\nrun = a\n", "t", "x"));
+        THROWS(ProfileError, parse_dep("[dep]\nos = ../x\n[install]\nrun = a\n", "t", "x"));
         CHECK(is_exact_alpine_release("3.24.3") && is_exact_alpine_release("v3.24.3"));
         CHECK(!is_exact_alpine_release("latest-stable") && !is_exact_alpine_release("v3.24") && !is_exact_alpine_release("edge") && !is_exact_alpine_release(""));
         std::string branch;
@@ -370,14 +394,39 @@ int main() {
     test("data files: bundle profiles take the OS file, sharing and integrity", [] {
         DataRoot r;
         const std::string a = "[profile]\nname=one\nmode=bundle\ncommand=sh\nos=alpine-x\n";
-        Profile p = parse_profile(a, "t"), q = parse_profile("[profile]\nname=two\nmode=bundle\ncommand=sh\nos=alpine-x\n[bundle]\nprovision = echo hi\n", "t");
+        Profile p = parse_profile(a, "t"), q = parse_profile("[profile]\nname=two\nmode=bundle\ncommand=sh\nos=alpine-x\n[deps]\nuse = hello hello\n", "t");
         Profile y = parse_profile("[profile]\nname=three\nmode=bundle\ncommand=sh\nos=alpine-y\n", "t");
         for (Profile* x : {&p, &q, &y}) resolve_profile_data(*x, {r.d});
         CHECK(p.alpine_version == "3.24.3" && p.alpine_sha256 == std::string(64, 'a') && p.apk_packages == (Strings{"git", "curl"}) && p.bundle_id == "alpine-x");
         User u = fake_user();
         Paths pa = make_paths(u, p.name, p.bundle_id), pb = make_paths(u, q.name, q.bundle_id);
         CHECK(pa.rootfs == pb.rootfs && pa.home != pb.home);                               // userland shared, $HOME never
-        CHECK(bundle_spec(p) == bundle_spec(q) && bundle_spec(p) != bundle_spec(y));       // provision is per profile; version/packages are the OS's
+        CHECK(bundle_spec(p) == bundle_spec(q) && bundle_spec(p) != bundle_spec(y));       // deps are per profile; version/packages are the OS's
+        CHECK(p.deps.empty() && q.deps.size() == 1 && q.deps[0].name == "hello");          // duplicates in `use` install once
+        CHECK(q.deps[0].needs == Strings{"sh"} && q.deps[0].run.size() == 1 && !q.deps[0].digest.empty());
+        CHECK(dep_stamp(q, q.deps[0]) == dep_stamp(q, q.deps[0]));
+        Profile other_home = q;
+        other_home.fake_user = "someone-else";
+        CHECK(dep_stamp(q, q.deps[0]) != dep_stamp(other_home, q.deps[0]));                // installed into $HOME: the path is part of the stamp
+        Profile host = parse_profile("[profile]\nname=h\ncommand=sh\n[deps]\nuse = hello\n", "t");   // mode = host
+        THROWS(ProfileError, resolve_profile_data(host, {r.d}));                           // nothing writable to install into
+        CHECK(q.deps[0].os == "alpine-x" && q.deps[0].net == NetMode::None);              // taken from the recipe, not assumed
+        {   // a dep is the using profile with ONLY the documented overrides: identity, seccomp, terminal, os, home stay the profile's
+            Profile busy = q;
+            busy.net = NetMode::Ivpn; busy.cwd = CwdMode::Yes; busy.display = DisplayMode::Xephyr; busy.wm = "i3"; busy.audio = true;
+            busy.clipboard_out = true; busy.seccomp = "none"; busy.terminal = TermMode::Passthrough; busy.dep_use = {"hello"};
+            DepRecipe pasta = q.deps[0];
+            pasta.net = NetMode::Pasta;
+            Profile dp = dep_profile(busy, pasta);
+            CHECK(dp.net == NetMode::Pasta && dp.cwd == CwdMode::None && dp.display == DisplayMode::None && dp.wm.empty());
+            CHECK(!dp.audio && !dp.clipboard_out && dp.dep_use.empty() && dp.deps.empty());
+            CHECK(dp.seccomp == "none" && dp.terminal == TermMode::Passthrough);              // inherited from the profile, not forced
+            CHECK(dp.name == busy.name && dp.fake_user == busy.fake_user && dp.os == busy.os && dp.bundle_id == busy.bundle_id && dp.root == RootMode::Bundle);
+        }
+        Profile wrong = parse_profile("[profile]\nname=w\nmode=bundle\ncommand=sh\nos=alpine-x\n[deps]\nuse = wrongos\n", "t");
+        THROWS(ProfileError, resolve_profile_data(wrong, {r.d}));                          // built for another userland: would not run here
+        Profile nodep = parse_profile("[profile]\nname=n\nmode=bundle\ncommand=sh\nos=alpine-x\n[deps]\nuse = nosuchdep\n", "t");
+        THROWS(ProfileError, resolve_profile_data(nodep, {r.d}));                          // unknown dep: fail closed
         THROWS(Error, make_paths(u, "x", "../escape"));
         THROWS(Error, bundle_ensure(p, u, pa, false, true));                               // print/check never download: nothing set up yet
         THROWS(ProfileError, parse_profile("[bundle]\nalpine_version = 3.24.3\n", "t"));   // moved to data/os

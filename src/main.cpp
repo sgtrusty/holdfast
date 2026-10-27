@@ -29,7 +29,7 @@ static int cmd_list(const Strings& a, bool verbose) {
     std::string home;
     try { home = resolve_user().home.string(); } catch (...) {}
     const Strings roots = data_roots(home);
-    if (a.size() > 1 || (!a.empty() && a[0] != "libs" && a[0] != "os")) throw Error("usage: holdfast list [libs|os] [-v]");
+    if (a.size() > 1 || (!a.empty() && a[0] != "libs" && a[0] != "os" && a[0] != "deps")) throw Error("usage: holdfast list [libs|os|deps] [-v]");
     auto line = [&](const std::string& name, const char* kind, const std::string& desc, const fs::path& file) {
         std::printf("%-20s %-7s %s", name.c_str(), kind, desc.c_str());
         if (verbose) std::printf("  [%s]", file.c_str());
@@ -37,9 +37,10 @@ static int cmd_list(const Strings& a, bool verbose) {
     };
     if (!a.empty()) {
         const std::string which = a[0];
-        for (const auto& n : list_data(roots, which == "libs" ? "lib" : "os")) {
+        for (const auto& n : list_data(roots, which == "libs" ? "lib" : which == "deps" ? "dep" : "os")) {
             try {
                 if (which == "libs") { LibDef d = load_lib(n, roots); line(n, "lib", d.description, d.file); }
+                else if (which == "deps") { DepRecipe d = load_dep(n, roots); line(n, "dep", d.description, find_data(roots, "dep", n).value_or("")); }
                 else { OsDef o = load_os(n, roots); line(n, o.kind == OsKind::Host ? "host" : "bundle", o.description, o.file); }
             } catch (const Error& ex) { line(n, "INVALID", ex.what(), ""); }
         }

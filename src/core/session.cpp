@@ -105,7 +105,8 @@ int run_profile(Profile p, const RunOptions& o) {
     validate_profile(p, !o.command.empty());
     Prepared pr = prepare(p);
 
-    if (p.root == RootMode::Bundle) bundle_ensure(p, pr.user, pr.paths, o.refresh, o.dry);   // first run builds it, in sandboxes
+    if (p.root == RootMode::Bundle && !o.userland_ready)
+        bundle_ensure(p, pr.user, pr.paths, o.refresh, o.dry);   // first run builds it, in sandboxes
 
     // -- working tree ------------------------------------------------------------
     CwdMode cm = o.no_cwd ? CwdMode::None : (o.yes || o.cwd ? CwdMode::Yes : p.cwd);

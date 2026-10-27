@@ -16,18 +16,16 @@ command     = lazygit
 cwd         = ask
 new_session = no
 
-[bundle]
-# Per-profile only. Run once, with network, as userns-root inside the bundle. HOME=/home/sandbox is persistent.
-provision = go install github.com/jesseduffield/lazygit@sh-integration
-provision = cargo install --git https://github.com/stefanhaller/delta.git --branch osc-1717-metadata --root /home/sandbox/go
-provision = git clone --depth 1 --branch osc-1717-metadata https://github.com/stefanhaller/difftastic.git /tmp/difft && cargo install --path /tmp/difft --root /home/sandbox/go
-provision = curl -fsSL https://raw.githubusercontent.com/stefanhaller/diff-so-fancy/refs/heads/osc-1717-metadata/diff-so-fancy -o /home/sandbox/go/bin/diff-so-fancy && chmod +x /home/sandbox/go/bin/diff-so-fancy
+[deps]
+# Install steps (data/dep/NAME.profile), run once into this profile's persistent $HOME with network via pasta. Each
+# recipe is stamped on its own: a new dep installs on the next run, an edited recipe asks for --refresh.
+use = lazygit delta difftastic diff-so-fancy
 
 [home]
 user = sandbox
 
 [network]
-mode = none                   # provisioning has network; day-to-day running does not
+mode = none                   # installing deps has network; day-to-day running does not
 
 [git]
 protect = yes                 # lazygit has to write .git (stage/commit); you opted into that

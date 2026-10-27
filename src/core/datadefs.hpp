@@ -48,9 +48,18 @@ Strings data_roots(const std::string& home);
 LibDef parse_lib(const std::string& text, const std::string& origin, const std::string& name);
 OsDef parse_os(const std::string& text, const std::string& origin, const std::string& name);
 
-std::optional<fs::path> find_data(const Strings& roots, const std::string& kind, const std::string& name);   // kind: "lib"|"os"|"profile"
+// data/dep/NAME.profile: one install step for bundle profiles. It runs as an ordinary run of the profile that uses it
+// (same userland read-only, same persistent $HOME, same identity, seccomp and terminal filter). Only what it declares differs:
+//   [dep]     os (required: must equal the using profile's os) · description · needs (commands that must exist in the userland)
+//   [network] mode = none (default) | pasta
+//   [install] run = <shell line>, repeatable, executed in order with HOME = the profile's persistent home.
+// The recipe is trusted code (like any profile's shell lines): read it before you use it.
+DepRecipe parse_dep(const std::string& text, const std::string& origin, const std::string& name);
+
+std::optional<fs::path> find_data(const Strings& roots, const std::string& kind, const std::string& name);   // kind: "lib"|"os"|"dep"|"profile"
 LibDef load_lib(const std::string& name, const Strings& roots);
 OsDef load_os(const std::string& name, const Strings& roots);
+DepRecipe load_dep(const std::string& name, const Strings& roots);
 Strings list_data(const Strings& roots, const std::string& kind);   // names, first root wins, sorted
 
 HostId read_host_id(const fs::path& os_release = "/etc/os-release");
@@ -59,7 +68,8 @@ std::optional<OsDef> match_host_os(const Strings& roots, const HostId& h);   // 
 std::string render_os(const OsDef& o);                               // canonical text of a kind=host file
 
 // Fills what profiles reference by name: bundle profiles get alpine_*/apk_packages/bundle_id from their OS
-// file; host profiles with `libs = minimal` get lib_binds from the lib closure of [libs] use and the OS lock.
+// file and their data/dep recipes; host profiles with `libs = minimal` get lib_binds from the lib closure of
+// [libs] use and the OS file list. [deps] use on a host profile is an error (nothing writable to install into).
 // Fails closed: unknown names, uncovered [bin] commands and missing locks are errors that say what to run.
 void resolve_profile_data(Profile& p, const Strings& roots);
 

@@ -152,6 +152,45 @@ OsDef parse_os(const std::string& text, const std::string& origin, const std::st
     return o;
 }
 
+DepRecipe parse_dep(const std::string& text, const std::string& origin, const std::string& name) {
+    DepRecipe d;
+    d.name = name;
+    for (const IniLine& l : parse_ini(text, origin)) {
+        if (l.section == "dep") {
+            if (l.key == "name") {
+                if (l.value != name) bad(l, origin, "must match the file name (" + name + ")");
+            } else if (l.key == "description") {
+                d.description = l.value;
+            } else if (l.key == "os") {
+                if (!valid_data_name(l.value)) bad(l, origin, "expected an os name (data/os/NAME.profile)");
+                d.os = l.value;
+            } else if (l.key == "needs") {
+                Strings v; words(v, l.value);
+                for (auto& c : v) if (c.find('/') != std::string::npos || c.empty()) bad(l, origin, "command names have no '/': " + c);
+                d.needs.insert(d.needs.end(), v.begin(), v.end());
+            } else {
+                bad(l, origin, "unknown key");
+            }
+        } else if (l.section == "network") {
+            if (l.key != "mode") bad(l, origin, "unknown key (expected mode)");
+            const std::string m = lower(l.value);
+            if (m == "none") d.net = NetMode::None;
+            else if (m == "pasta") d.net = NetMode::Pasta;
+            else bad(l, origin, "a dep may use none or pasta (host would share abstract sockets, ivpn needs root)");
+        } else if (l.section == "install") {
+            if (l.key != "run") bad(l, origin, "unknown key (expected run)");
+            if (l.value.empty()) bad(l, origin, "empty command");
+            d.run.push_back(l.value);
+        } else {
+            throw ProfileError(cat(origin, ":", l.no, ": unknown section [", l.section, "]"));
+        }
+    }
+    if (d.os.empty()) throw ProfileError(origin + ": [dep] os = NAME is required: a tool is built for one userland (musl vs glibc), so say which");
+    if (d.run.empty()) throw ProfileError(origin + ": [install] needs at least one `run = ...` line");
+    d.digest = sha256_str(cat(d.os, "|", d.net == NetMode::Pasta ? "pasta" : "none", "|", join(d.needs, " "), "|", join(d.run, "\n")));
+    return d;
+}
+
 std::optional<fs::path> find_data(const Strings& roots, const std::string& kind, const std::string& name) {
     if (!valid_data_name(name)) return std::nullopt;
     for (const auto& r : roots) {                       // the directory (profile/ lib/ os/) says what a file is; the extension is always .profile
@@ -168,6 +207,12 @@ LibDef load_lib(const std::string& name, const Strings& roots) {
     LibDef d = parse_lib(read_file(*f), f->string(), name);
     d.file = *f;
     return d;
+}
+
+DepRecipe load_dep(const std::string& name, const Strings& roots) {
+    auto f = find_data(roots, "dep", name);
+    if (!f) throw ProfileError(cat("dep '", name, "' not found; create data/dep/", name, ".profile (searched: ", join(roots, ", "), ")"));
+    return parse_dep(read_file(*f), f->string(), name);
 }
 
 OsDef load_os(const std::string& name, const Strings& roots) {
@@ -249,8 +294,19 @@ void resolve_profile_data(Profile& p, const Strings& roots) {
         p.alpine_sha256 = o.alpine_sha256;
         p.apk_packages = o.packages;
         p.bundle_id = o.name;                       // every profile naming this os shares one userland
+        std::set<std::string> seen_dep;
+        p.deps.clear();
+        for (const auto& n : p.dep_use) {
+            if (!seen_dep.insert(n).second) continue;
+            p.deps.push_back(load_dep(n, roots));
+            if (p.deps.back().os != p.os)                       // binaries built for another userland would not run here
+                throw ProfileError(cat("dep '", n, "' is built for os '", p.deps.back().os, "' but profile '", p.name, "' uses os '", p.os,
+                                       "'; use a dep for '", p.os, "' or change the profile's os"));
+        }
         return;
     }
+    if (!p.dep_use.empty())
+        throw ProfileError(cat("[deps] use needs mode = bundle: a host-mode profile has no writable userland to install into (profile '", p.name, "')"));
     if (p.libs == LibsMode::Full) {
         if (!p.lib_use.empty()) log::warn("[libs] use is ignored with libs = full");
         return;

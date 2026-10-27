@@ -13,7 +13,7 @@ namespace hf {
 //   <data>/bundles/<id>/spec.stamp      hash of version|mirror|sha256 the rootfs was built from
 //   <data>/bundles/<id>/tarball.sha256  sha256 of the verified minirootfs tarball
 //   <data>/profiles/<name>/home         persistent fake $HOME (never shared)
-//   <data>/profiles/<name>/provision.stamp
+//   <data>/profiles/<name>/deps/<dep>.stamp   one per installed data/dep recipe
 // Ephemeral per-run:
 //   <runtime>/holdfast/<name>.<pid>/    passwd, group, hosts, fonts.conf, args, xauth, clip
 struct Paths {

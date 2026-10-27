@@ -20,6 +20,17 @@ struct MountSpec {
     bool optional = false; // skip silently when src is missing
 };
 
+// data/dep/NAME.profile: one install step for a bundle profile (a tool built or fetched into the profile's $HOME).
+// It runs as an ordinary run of the profile that uses it; everything it needs differently is declared here.
+struct DepRecipe {
+    std::string name, description;
+    std::string os;                // the userland it is built for; the using profile must name the same os
+    NetMode net = NetMode::None;   // [network] mode: none (default) or pasta
+    Strings needs;                 // commands that must already exist in the userland (its packages come from data/os)
+    Strings run;                   // shell lines, run once with the profile's identity and $HOME
+    std::string digest;            // hash of os+net+needs+run: a changed recipe is detected, never silently re-run
+};
+
 struct Profile {
     // [profile]
     std::string name, description;
@@ -76,14 +87,17 @@ struct Profile {
     bool git_protect = true;
     Strings font_families;
 
-    // [bundle] provision is per profile. Everything else below is NOT parsed from the profile: it comes from
-    // the profile's data/os file (bundle kind) via resolve_profile_data(), so one OS setup is declared once.
+    // [deps] use: the data/dep recipes installed into this profile's persistent $HOME (bundle mode only).
+    Strings dep_use;
+
+    // Everything below is NOT parsed from the profile: resolve_profile_data() fills it from the profile's data/os file
+    // (bundle kind) and its data/dep recipes, so one OS setup and each install step are declared exactly once.
     std::string bundle_id;         // = the os name; every profile naming the same os shares one userland
     std::string alpine_version;
     std::string alpine_mirror = "https://dl-cdn.alpinelinux.org/alpine";
     std::string alpine_sha256;     // optional pin of the minirootfs tarball
     Strings apk_packages;
-    Strings provision;             // shell lines run once inside the bundle (with network)
+    std::vector<DepRecipe> deps;   // in `use` order
 };
 
 Profile parse_profile(const std::string& text, const std::string& origin);

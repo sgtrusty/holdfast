@@ -45,7 +45,7 @@ void print_usage(FILE* f) {
     row("check PROFILE", "validate a profile");
 
     head("PROFILES AND DATA");
-    row("list [libs|os]", "list profiles (or lib / os definitions)");
+    row("list [libs|os|deps]", "list profiles (or lib / os / dep files)");
     row("libs [OS]", "scan this host, print its library file list");
 
     head("NETWORK (ivpn)");
@@ -62,7 +62,7 @@ void print_usage(FILE* f) {
     row("--net=none|pasta|host|ivpn", "override the profile's network mode");
     row("--wg=FILE", "WireGuard config (ivpn)");
     row("-n, --dry-run", "same as print");
-    row("--refresh", "run: rebuild the userland; libs: rewrite the list");
+    row("--refresh", "run: redo changed userland / deps; libs: rewrite list");
     row("--check", "libs: exit 1 if the saved list is stale");
     row("-v, --verbose", "debug output (list: show file paths)");
 

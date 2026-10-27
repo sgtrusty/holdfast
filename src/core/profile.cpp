@@ -174,10 +174,18 @@ Profile parse_profile(const std::string& text, const std::string& o) {
         } else if (s == "fonts") {
             if (k == "allow") append_words(p.font_families, v); else bad(l, o, "unknown key");
         } else if (s == "bundle") {
-            if (k == "provision") p.provision.push_back(v);
+            if (k == "provision")
+                bad(l, o, "moved out of profiles: write each install step as data/dep/NAME.profile and list it under [deps] use = NAME");
             else if (k == "id" || k == "alpine_version" || k == "alpine_mirror" || k == "alpine_sha256" || k == "packages")
-                bad(l, o, "moved out of profiles: declare the OS setup once in data/os/NAME.os (kind = bundle) and set [profile] os = NAME");
+                bad(l, o, "moved out of profiles: declare the OS setup once in data/os/NAME.profile (kind = bundle) and set [profile] os = NAME");
             else bad(l, o, "unknown key");
+        } else if (s == "deps") {
+            if (k == "use") {
+                Strings names;
+                append_words(names, v);
+                for (auto& n : names) if (!valid_data_name(n)) bad(l, o, "invalid dep name: " + n);
+                p.dep_use.insert(p.dep_use.end(), names.begin(), names.end());
+            } else bad(l, o, "unknown key");
         } else {
             throw ProfileError(cat(o, ":", l.no, ": unknown section [", s, "]"));
         }

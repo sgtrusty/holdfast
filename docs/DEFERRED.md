@@ -64,9 +64,14 @@ checks (resize, Ctrl-C, mouse, exit) with `lazyvim` and `lazygit-dev`. Specific 
 - The lib/os/profile files use the INI-style syntax; TOML is a later rename, not a redesign.
 - Bundles are Alpine only. The shared `os` mechanism is not Alpine-specific, but no other distro is fetched or verified.
 - The Alpine tarball hash comes from the same mirror unless you pin `alpine_sha256` in the `data/os` file; GPG verification is not implemented.
-- `provision` lines run with a shared rootfs writable; keep them to `$HOME` (packages go in the `data/os` file).
-- The provision sandbox (`apk add` and your lines, with network) runs without the default seccomp filter, unlike the
-  fetch/extract sandbox and the run sandbox. Adding it needs a real run to see what `apk`, `go` and `cargo` need.
+- Dep recipes install into `$HOME`: the userland is read-only for them, so a write elsewhere fails (packages go in the
+  `data/os` file). A recipe that needs a tool whose cache or output is not under `$HOME` or `/tmp` will fail until it is
+  pointed there; this has not been tried with `go`, `cargo` or `git` under a real bwrap yet.
+- A dep's stamp covers its recipe, not the userland it was built against: after `--refresh` rebuilds the userland (a new Go,
+  say), already-installed deps are kept until their own recipe changes or you delete their stamp. `needs` only checks that
+  a command exists, not its version.
+- The `apk add` sandbox (writable userland, userns-root, network) runs without the default seccomp filter. Dep recipes do
+  get the profile's filter, since they are ordinary runs. Adding it to `apk` needs a real run to see what it needs.
 - The fetch/extract sandbox still uses host binaries (`curl tar gzip sha256sum`) with the host's `/usr/lib` mounted read-only.
   It sees none of your files, but it is not a minimal-libs sandbox.
 - No bundle or purge command: to remove a userland or a profile's saved `$HOME`, delete its folder (`holdfast doctor`
