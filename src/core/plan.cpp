@@ -251,6 +251,9 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
     b.flag("--die-with-parent");
     if (p.new_session && !c.pty_proxy) b.flag("--new-session");   // blocks TIOCSTI keystroke injection; with a pty proxy the sandbox's tty IS the proxy
     b.raw({"--cap-drop", "ALL"});
+    // bwrap applies --clearenv/--setenv strictly in order: --clearenv must come BEFORE every --setenv (DISPLAY, XAUTHORITY,
+    // PULSE_SERVER, HOME, ...) or it wipes them. Keep it here, ahead of the display/audio/environment sections below.
+    b.flag("--clearenv");
     // Inside pasta's user namespace we may be mapped to uid 0; pin the identity the fake passwd describes.
     if (c.pasta) b.raw({"--uid", uid, "--gid", std::to_string(c.user.gid)});
     if (p.disable_userns && c.userns_disable_supported) b.flag("--disable-userns");
@@ -347,8 +350,7 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
         b.bind(c.session / "clip", p.clipboard_path);
     }
 
-    // -- environment ------------------------------------------------------------
-    b.flag("--clearenv");
+    // -- environment (--clearenv was emitted at the top: see the comment there) ----------------
     b.setenv("HOME", fhome.string()).setenv("USER", U).setenv("LOGNAME", U).setenv("SHELL", "/bin/sh");
     b.setenv("XDG_RUNTIME_DIR", (fs::path("/run/user") / uid).string());
     if (p.root == RootMode::Host) b.setenv("PATH", "/usr/bin:" + (fhome / ".local/bin").string());

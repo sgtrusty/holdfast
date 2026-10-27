@@ -39,6 +39,19 @@ checks (resize, Ctrl-C, mouse, exit) with `lazyvim` and `lazygit-dev`. Specific 
 - **seccomp is a denylist**, not a syscall allowlist. It removes known-dangerous calls (`bpf`, `io_uring_*`, `mount`, ...)
   but the rest of the syscall surface stays reachable. `clone`, `clone3`, `unshare`, `setns`, `ptrace` are deliberately
   allowed. A real allowlist per profile class would be a separate project.
+- **The sudo ticket is live for the whole ivpn session.** holdfast revokes the ticket it created when it exits (`sudo -k`), but
+  while the sandbox runs it keeps refreshing it, because teardown needs root. Other processes of yours in the same terminal
+  session can use it during that time. Closing that window would need a small privileged helper that holds the rules and
+  cleans up by itself, which is a bigger design than this.
+- **ivpn on hosts with their own nftables forward policy.** holdfast's host rules are `iptables` (the nft shim on most
+  distros). Another table with `policy drop` on the forward hook can win over them; if the packets die on the host, the
+  failure prints the exact `nft` rules to add (`docs/NETWORK.md`, "No handshake"), but holdfast does not add them itself. A
+  native nftables backend (roadmap) would remove the guesswork. On one real host (Arch, whose stock config has such a chain)
+  the packet counters showed the forwarding working anyway, so this is a diagnosis aid, not a known failure.
+- **ivpn has only been seen working on one host.** A failed run there turned out to be a stale WireGuard config (the server
+  answered, WireGuard discarded the answers); with a fresh config the tunnel came up and the browser started. holdfast now says
+  "config probably wrong or stale" and keeps the packet counters and kernel view behind `-v`. The sudo/pty fix and the DISPLAY fix
+  that followed have not been re-run end to end.
 - **`net=host`** shares the host network namespace, including abstract unix sockets (X11, some D-Bus), whatever
   `display = none` says. Prefer `net=pasta`. pasta (and host) still reach the LAN.
 - **Whitelisted binaries are a PATH allowlist, not an exec allowlist.** With `libs = full`, anything executable under

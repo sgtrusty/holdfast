@@ -14,6 +14,9 @@ hostname    = localhost
 cwd         = none            # a browser needs no project directory
 # Browsers are GUI apps with no tty: new-session is harmless and keeps TIOCSTI closed.
 new_session = yes
+# LibreWolf prints "Sandbox: CanCreateUserNamespace() clone() failure: ENOSPC" and runs without its own inner content sandbox,
+# because holdfast forbids nested user namespaces (disable_userns, default yes). That is a trade-off, not a fault: set
+# `disable_userns = no` to let the browser build that inner layer, at the price of allowing user namespaces inside this sandbox.
 
 [bin]
 # Host binaries that exist inside the sandbox. Nothing else is executable.

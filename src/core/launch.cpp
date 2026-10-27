@@ -144,7 +144,7 @@ int exit_code(int status) {
 
 bool terminal_proxy_possible() { return isatty(STDIN_FILENO) && isatty(STDOUT_FILENO); }
 
-int run_sandbox(const Strings& argv, bool filter) {
+int run_sandbox(const Strings& argv, bool filter, bool wrapper_makes_ctty) {
     if (!filter || !terminal_proxy_possible()) return run_with_signals(argv);
 
     termios tio{};
@@ -182,8 +182,10 @@ int run_sandbox(const Strings& argv, bool filter) {
     pid_t pid = fork();
     if (pid < 0) throw Error("fork failed");
     if (pid == 0) {
-        setsid();
-        ioctl(slave, TIOCSCTTY, 0);                           // the pty slave becomes the sandbox's controlling terminal
+        if (!wrapper_makes_ctty) {
+            setsid();
+            ioctl(slave, TIOCSCTTY, 0);                       // the pty slave becomes the sandbox's controlling terminal
+        }                                                     // else: argv ends in `setsid -w -c`, which does this AFTER sudo has run
         const bool err_tty = isatty(STDERR_FILENO);
         dup2(slave, STDIN_FILENO);
         dup2(slave, STDOUT_FILENO);

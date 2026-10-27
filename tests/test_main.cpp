@@ -497,6 +497,55 @@ int main() {
         CHECK(!handle_meta({"run"}).has_value());                                    // real commands are not meta commands
     });
 
+    test("ivpn: handshake diagnosis", [] {
+        const std::string fwd =
+            "Chain FORWARD (policy DROP 0 packets, 0 bytes)\n"
+            "num      pkts      bytes target     prot opt in     out     source               destination\n"
+            "1           3        252 ACCEPT     udp  --  hfh135 *       10.200.135.2         198.51.100.7         udp dpt:2049 /* holdfast:hf-x */\n"
+            "2           0          0 ACCEPT     udp  --  *      hfh135  198.51.100.7         10.200.135.2         udp spt:2049 ctstate RELATED,ESTABLISHED /* holdfast:hf-x */\n"
+            "3           7          9 DROP       0    --  hfh135 *       0.0.0.0/0            0.0.0.0/0            /* holdfast:hf-x */\n";
+        CHECK(iptables_hits(fwd, "ACCEPT", "hfh135", "*") == 3);
+        CHECK(iptables_hits(fwd, "ACCEPT", "*", "hfh135") == 0);
+        CHECK(iptables_hits(fwd, "DROP", "hfh135", "*") == 7);
+        CHECK(iptables_hits(fwd, "ACCEPT", "nope", "*") == -1);                          // no such rule
+        CHECK(iptables_hits("", "ACCEPT", "*", "*") == -1);
+        CHECK(has_nft_forward_drop("table inet filter {\n\tchain forward {\n\t\ttype filter hook forward priority filter; policy drop;\n\t}\n}\n"));
+        CHECK(!has_nft_forward_drop("hook forward priority filter; policy accept;\nhook input priority filter; policy drop;\n"));
+        CHECK(wg_transfer_rx("XDU6Syq1DY82IMatsHV0x/TAtbLiRwh/SdFCXlEn40c=\t0\t444\n") == 0);             // the real failing run
+        CHECK(wg_transfer_rx("KEY\t1234\t99") == 1234);
+        CHECK(wg_transfer_rx("") == -1 && wg_transfer_rx("garbage") == -1 && wg_transfer_rx("KEY\tx\ty") == -1);
+        CHECK(config_has_preshared_key("[Peer]\nPublicKey = a\nPresharedKey = b\n") && config_has_preshared_key("  presharedkey=b\n"));
+        CHECK(!config_has_preshared_key("[Peer]\nPublicKey = a\n# PresharedKey = b\n"));
+
+        auto why = [](const HandshakeTrail& t) { return explain_handshake_failure(t, "hfh135", "198.51.100.7", 2049); };
+        auto has = [](const std::string& s, const char* part) { return s.find(part) != std::string::npos; };
+        HandshakeTrail t;
+        t.sent = 4; t.forwarded = 0; t.replies = 0; t.delivered = 0;                      // dies at the host's forward hook
+        CHECK(has(why(t), "never reach holdfast's FORWARD rule") && !has(why(t), "nft insert rule"));
+        t.nft_forward_drop = true;                                                        // ... and an nftables drop chain exists
+        CHECK(has(why(t), "nft insert rule inet filter forward iifname \"hfh*\" ip daddr 198.51.100.7 udp dport 2049 accept"));
+        CHECK(has(why(t), "oifname \"hfh*\" ct state established,related accept"));
+        t.forwarded = 4;                                                                  // left the machine, nothing came back
+        CHECK(has(why(t), "nothing came back") && has(why(t), "198.51.100.7:2049"));
+        t.replies = 4;                                                                    // came back to the host, not into the namespace
+        CHECK(has(why(t), "not the namespace") && has(why(t), "rp_filter"));
+        t.delivered = 4;                                                                  // delivered, yet no handshake
+        CHECK(has(why(t), "stale") && !has(why(t), "accepted none"));                    // wg's own rx unknown: generic advice
+        t.wg_rx_bytes = 0;                                                                // WireGuard itself accepted nothing: the user's real case
+        t.config_has_psk = 1;
+        CHECK(has(why(t), "accepted none of them") && has(why(t), "has received 0 bytes") && has(why(t), "this config has a PresharedKey line"));
+        CHECK(has(why(t), "tcpdump -ni hfn135 -vv udp"));                                 // the exact capture command, interface derived
+        t.config_has_psk = 0;
+        CHECK(has(why(t), "NO PresharedKey line"));
+        t.wg_rx_bytes = 512;                                                              // it did receive data: no "discarded" claim
+        CHECK(!has(why(t), "accepted none") && has(why(t), "WireGuard has received data"));
+        t.sent = 0;
+        CHECK(has(why(t), "never sent a handshake"));
+        t.sent = -1;
+        CHECK(has(why(t), "could not be read"));
+        CHECK(has(why(t), "sent from the namespace") && has(why(t), "?"));                // unreadable counters print as ?
+    });
+
     test("doctor: feature evaluation", [] {
         auto find = [](const std::vector<FeatureStatus>& v, const std::string& name) {
             for (const auto& f : v) if (f.name == name) return f;
@@ -610,6 +659,29 @@ int main() {
         CHECK(read_file(c.session / "resolv.conf") == pasta_resolv_conf());
         Strings pa = pasta_argv("/usr/bin/pasta", {"sh", "-c", "x"});
         CHECK(has_seq(pa, {"-T", "none", "-U", "none"}) && has_seq(pa, {"--no-map-gw"}) && has_seq(pa, {"--", "sh", "-c", "x"}));
+        fs::remove_all(d);
+    });
+
+    test("plan: --clearenv comes before every --setenv (DISPLAY must survive)", [] {
+        char tmpl[] = "/tmp/hf-plan-env-XXXXXX";
+        std::string d = mkdtemp(tmpl);
+        User u = fake_user(); u.home = d + "/home"; fs::create_directories(u.home);
+        u.runtime_dir = d + "/run";
+        Policy pol(u, {});
+        Profile p = parse_profile("[profile]\nname=t\ncommand=sh\n[bin]\nallow = sh\n[fs]\nlibs=full\n[home]\nuser=box\n[env]\nset = FOO=bar\n", "t");
+        PlanCtx c; c.user = u; c.paths = make_paths(u, "t"); c.paths.data = d + "/data"; c.paths.home = d + "/data/home";
+        c.policy = &pol; c.session = d + "/sess"; fs::create_directories(c.session);
+        c.display = DisplayInfo{":90", "/tmp/.X11-unix/X90", "", false};                  // what a Xephyr profile gets
+        const Strings a = build_plan(p, c).b.args();
+        size_t clear = a.size(), first_set = a.size(), display = a.size();
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (a[i] == "--clearenv" && clear == a.size()) clear = i;
+            if (a[i] == "--setenv") { if (first_set == a.size()) first_set = i; if (i + 1 < a.size() && a[i + 1] == "DISPLAY") display = i; }
+        }
+        CHECK(clear < a.size() && display < a.size() && first_set < a.size());
+        CHECK(clear < first_set && clear < display);                                      // bwrap applies these in order: a later --clearenv would wipe DISPLAY
+        CHECK(std::count(a.begin(), a.end(), "--clearenv") == 1);
+        CHECK(has_seq(a, {"--setenv", "DISPLAY", ":90"}) && has_seq(a, {"--setenv", "FOO", "bar"}));
         fs::remove_all(d);
     });
 

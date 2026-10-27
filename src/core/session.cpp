@@ -185,11 +185,11 @@ int run_profile(Profile p, RunOptions o) {
 
     Strings launch = launcher_argv(pr.bwrap, sd.path, plan.b, plan.seccomp);
     if (c.pasta) launch = pasta_argv(pasta, launch);
-    Strings full = ns ? ns->wrap(launch) : as_user(pr.user, launch);
+    Strings full = ns ? ns->wrap(launch, c.pty_proxy) : as_user(pr.user, launch);
     log::info(cat("starting '", p.name, "' (", p.root == RootMode::Host ? "host-whitelist" : "bundle", " userland, net=",
                   p.net == NetMode::None ? "none" : p.net == NetMode::Host ? "host" : p.net == NetMode::Pasta ? "pasta" : "ivpn", ")"));
-    int rc = run_sandbox(full, p.terminal == TermMode::Filter);
-    log::info(cat("sandbox exited with code ", rc));
+    int rc = run_sandbox(full, p.terminal == TermMode::Filter, ns && c.pty_proxy);
+    if (rc != 0) log::info(cat("sandbox exited with code ", rc));
     return rc;    // destructors: clipboard -> Xephyr -> netns (rules, veth, namespace) -> session dir
 }
 

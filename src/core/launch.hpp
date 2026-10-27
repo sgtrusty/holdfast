@@ -32,7 +32,10 @@ int run_with_signals(const Strings& argv);
 // reaches your real terminal (no clipboard writes, no fake titles/links, no reply-injection, modes restored
 // on exit). Because the sandbox's tty is the pty, TIOCSTI can only type into the sandbox itself, so no
 // `--new-session` (and none of its Ctrl-C/job-control/ /dev/tty side effects) is needed.
+// `wrapper_makes_ctty`: argv starts with a privileged wrapper (sudo ...) that must keep seeing YOUR terminal session,
+// because sudo's ticket is tied to it: a new session here would make sudo ask for the password a second time. The
+// pty then becomes the controlling terminal further in (`setsid -w -c`, see NetNs::wrap) instead of in this child.
 bool terminal_proxy_possible();
-int run_sandbox(const Strings& argv, bool filter);
+int run_sandbox(const Strings& argv, bool filter, bool wrapper_makes_ctty = false);
 
 }  // namespace hf

@@ -16,7 +16,7 @@ Mount syntax: `SRC` or `SRC => DEST` (DEST defaults to SRC). Globs (`* ? [..]`) 
 | hostname | `holdfast` | UTS hostname inside |
 | terminal | `filter` | `filter`: when stdin/stdout are terminals the program runs on a fresh pty (its own controlling tty) and everything it prints is filtered, see "Terminal filter" below. `passthrough`: the sandbox writes straight to your terminal (not recommended). |
 | new_session | `yes` | `bwrap --new-session`. Only used when the terminal is NOT proxied (`terminal = passthrough`, or stdio is not a tty). It blocks TIOCSTI, but Ctrl-C then hits holdfast and `/dev/tty` is unavailable. With `terminal = filter` it is unnecessary. |
-| disable_userns | `yes` | `--disable-userns` when bwrap ≥ 0.8 |
+| disable_userns | `yes` | `--disable-userns` when bwrap ≥ 0.8: nothing inside may create user namespaces. Browsers want them for their own inner content sandbox (Firefox/LibreWolf print `CanCreateUserNamespace() ... ENOSPC` and run without that layer); `no` allows it, at the price of user namespaces being possible inside this sandbox |
 | seccomp | `default` | `default` (built-in libseccomp filter, see below) · `none` (no filter, warns) · path to a compiled BPF file. A build without libseccomp refuses `default`. |
 | cwd | `ask` | `none` / `ask` (tty prompt) / `yes`; mounts the current dir at `cwd_dest` |
 | cwd_dest | `/shared` | absolute, not under `/usr /etc /bin /lib /proc /dev /sys /run /var` |

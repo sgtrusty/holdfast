@@ -46,7 +46,7 @@ std::unique_ptr<XephyrServer> XephyrServer::start(const User& u, const Profile& 
         }
         s->pid_ = spawn(as_user(u, argv), true);
         for (int i = 0; i < 60; ++i) {
-            if (exists_nofollow(sock)) { log::info(cat("Xephyr up on ", s->info_.display, " (", p.display_size, ")")); return s; }
+            if (exists_nofollow(sock)) { log::debug(cat("Xephyr up on ", s->info_.display, " (", p.display_size, ")")); return s; }
             if (!child_alive(s->pid_)) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
