@@ -14,9 +14,8 @@ hostname    = localhost
 cwd         = none            # a browser needs no project directory
 # Browsers are GUI apps with no tty: new-session is harmless and keeps TIOCSTI closed.
 new_session = yes
-# LibreWolf prints "Sandbox: CanCreateUserNamespace() clone() failure: ENOSPC" and runs without its own inner content sandbox,
-# because holdfast forbids nested user namespaces (disable_userns, default yes). That is a trade-off, not a fault: set
-# `disable_userns = no` to let the browser build that inner layer, at the price of allowing user namespaces inside this sandbox.
+# Nested user namespaces are forbidden here (disable_userns, the default): this sandbox is the isolation layer, LibreWolf does not
+# get to build another one out of namespaces. [env] below tells it so up front instead of letting it probe and complain.
 
 [bin]
 # Host binaries that exist inside the sandbox. Nothing else is executable.
@@ -40,6 +39,10 @@ user = browser
 
 [env]
 set  = MOZ_ENABLE_WAYLAND=0
+# "No user namespaces here": Firefox's own switch for its probe (a cache variable in security/sandbox/linux/SandboxInfo.cpp).
+# Without it LibreWolf tries clone(CLONE_NEWUSER), gets ENOSPC and prints "CanCreateUserNamespace() ... ENOSPC". Its seccomp-bpf
+# content filter is detected separately and stays on; only the namespace layer is skipped.
+set  = MOZ_ASSUME_USER_NS=0
 pass = LANG
 
 [network]

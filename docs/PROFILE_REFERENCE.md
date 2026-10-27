@@ -16,7 +16,7 @@ Mount syntax: `SRC` or `SRC => DEST` (DEST defaults to SRC). Globs (`* ? [..]`) 
 | hostname | `holdfast` | UTS hostname inside |
 | terminal | `filter` | `filter`: when stdin/stdout are terminals the program runs on a fresh pty (its own controlling tty) and everything it prints is filtered, see "Terminal filter" below. `passthrough`: the sandbox writes straight to your terminal (not recommended). |
 | new_session | `yes` | `bwrap --new-session`. Only used when the terminal is NOT proxied (`terminal = passthrough`, or stdio is not a tty). It blocks TIOCSTI, but Ctrl-C then hits holdfast and `/dev/tty` is unavailable. With `terminal = filter` it is unnecessary. |
-| disable_userns | `yes` | `--disable-userns` when bwrap ≥ 0.8: nothing inside may create user namespaces. Browsers want them for their own inner content sandbox (Firefox/LibreWolf print `CanCreateUserNamespace() ... ENOSPC` and run without that layer); `no` allows it, at the price of user namespaces being possible inside this sandbox |
+| disable_userns | `yes` | `--disable-userns` when bwrap ≥ 0.8: nothing inside may create user namespaces, which also removes a large kernel attack surface. Browsers probe for them to build an inner sandbox; Firefox/LibreWolf then print `CanCreateUserNamespace() ... ENOSPC` and continue with only their seccomp layer. `[env] set = MOZ_ASSUME_USER_NS=0` makes Firefox skip the probe quietly (see `data/profile/librewolf-ivpn.profile`). `no` allows the inner namespace layer, at the price of user namespaces being possible inside this sandbox |
 | seccomp | `default` | `default` (built-in libseccomp filter, see below) · `none` (no filter, warns) · path to a compiled BPF file. A build without libseccomp refuses `default`. |
 | cwd | `ask` | `none` / `ask` (tty prompt) / `yes`; mounts the current dir at `cwd_dest` |
 | cwd_dest | `/shared` | absolute, not under `/usr /etc /bin /lib /proc /dev /sys /run /var` |
@@ -31,7 +31,7 @@ Mount syntax: `SRC` or `SRC => DEST` (DEST defaults to SRC). Globs (`* ? [..]`) 
 | rw / rw_try | read-write bind (refused under system prefixes) |
 | tmpfs | extra tmpfs mount |
 | deny | extra deny-list path (globs ok) |
-| defaults | `yes`: bind ld.so.cache, terminfo, zoneinfo, ssl, ca-certificates, os-release (+resolv.conf if networked) |
+| defaults | `yes`: bind ld.so.cache, terminfo, zoneinfo, os-release and the CA trust store read-only (`/etc/ssl`, `/etc/ca-certificates`, `/usr/share/ca-certificates`, `/etc/pki`, `/usr/share/p11-kit`; the ones your distro has), plus resolv.conf if networked |
 | libs | `minimal` (default): bind exactly the locked files of the libs named in `[libs] use` (below); nothing is analysed at run time. `full`: bind `/usr/lib /usr/lib64` (and `/lib*`) read-only; needed for toolchains (`gcc`, `rustc`, ...) and for browsers. |
 
 ## [libs]  (host mode, `libs = minimal`)

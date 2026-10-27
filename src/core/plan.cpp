@@ -157,8 +157,12 @@ void mount_host_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, const 
     if (p.libs == LibsMode::Minimal) mount_listed_libs(b, p, c);
 
     if (p.fs_defaults) {
+        // CA trust: /etc/ssl and /etc/ca-certificates are often only pointers. The roots themselves live under
+        // /usr/share/ca-certificates (Debian, Arch trust-source), /etc/pki (Fedora/RHEL) or via p11-kit's module config;
+        // without them a browser or curl using the system store trusts nothing and every HTTPS site fails.
         for (const char* d : {"/etc/ld.so.cache", "/usr/share/terminfo", "/usr/share/zoneinfo", "/etc/ssl",
-                              "/etc/ca-certificates", "/etc/os-release", "/usr/lib/os-release"})
+                              "/etc/ca-certificates", "/usr/share/ca-certificates", "/etc/pki", "/usr/share/p11-kit",
+                              "/etc/os-release", "/usr/lib/os-release"})
             if (fs::exists(d)) b.ro_bind_try(d, d);
         if (c.network) bind_resolv_conf(b, c);
     }

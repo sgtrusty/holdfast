@@ -546,6 +546,25 @@ int main() {
         CHECK(has(why(t), "sent from the namespace") && has(why(t), "?"));                // unreadable counters print as ?
     });
 
+    test("shipped data files all parse", [] {
+        if (!fs::is_directory("data/profile")) return;                                    // only when run from the repository root
+        auto each = [](const char* dir, const std::function<void(const std::string&, const std::string&, const std::string&)>& parse) {
+            for (const auto& e : fs::directory_iterator(dir)) {
+                if (e.path().extension() != ".profile") continue;
+                try { parse(read_file(e.path()), e.path().string(), e.path().stem().string()); }
+                catch (const Error& ex) { CHECK(!"shipped file must parse"); std::printf("  %s: %s\n", e.path().c_str(), ex.what()); }
+            }
+        };
+        each("data/profile", [](const std::string& t, const std::string& o, const std::string&) { parse_profile(t, o); });
+        each("data/lib", [](const std::string& t, const std::string& o, const std::string& n) { parse_lib(t, o, n); });
+        each("data/os", [](const std::string& t, const std::string& o, const std::string& n) { parse_os(t, o, n); });
+        each("data/dep", [](const std::string& t, const std::string& o, const std::string& n) { parse_dep(t, o, n); });
+        Profile lw = parse_profile(read_file("data/profile/librewolf-ivpn.profile"), "librewolf-ivpn");
+        bool quiet_userns = false;
+        for (const auto& [k, v] : lw.env_set) if (k == "MOZ_ASSUME_USER_NS" && v == "0") quiet_userns = true;
+        CHECK(quiet_userns && lw.disable_userns);                                         // namespaces stay forbidden AND Firefox is told so
+    });
+
     test("doctor: feature evaluation", [] {
         auto find = [](const std::vector<FeatureStatus>& v, const std::string& name) {
             for (const auto& f : v) if (f.name == name) return f;
@@ -622,6 +641,8 @@ int main() {
         CHECK(!has_seq(a, {"--ro-bind", "/", "/"}));                // never whole host
         CHECK(!has_seq(a, {"--dev-bind"}));
         CHECK(has_seq(a, {"--ro-bind", c.session.string() + "/passwd", "/etc/passwd"}));
+        for (const char* trust : {"/etc/ssl", "/usr/share/ca-certificates", "/etc/pki"})      // CA roots, not just the pointers to them
+            if (fs::exists(trust)) CHECK(has_seq(a, {"--ro-bind-try", trust, trust}));
         CHECK(has_seq(a, {"--setenv", "HOME", "/home/box"}));
         CHECK((pl.b.cmd() == Strings{"sh"}));
         for (size_t i = 0; i + 2 < a.size(); ++i)                   // host /etc/passwd must never be bound
