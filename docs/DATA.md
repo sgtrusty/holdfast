@@ -33,8 +33,7 @@ The same word, **refresh**, is used for bundles: `holdfast run --refresh PROFILE
 
 ## Search order
 
-First match wins: `--data=DIR` (repeatable, command line), the profile's own `[profile] data` dirs (relative to the profile
-file, so a project can keep `os/` and `dep/` files next to its profile and run it from anywhere), `$HOLDFAST_DATA`,
+First match wins: `--data=DIR` (repeatable, command line), `$HOLDFAST_DATA`, `<profile dir>/data` (only for a profile given by path, so a project can keep `os/` and `dep/` files next to its profile and run it from anywhere; refused if group/world-writable or a symlink leaving the profile's directory),
 `$HOLDFAST_SHARE/data`, `~/.config/holdfast/data`, `/etc/holdfast/data`, then ONE
 shipped root: `data/` next to the binary (a checkout, or `/opt/holdfast` after `predep install`), else `/opt/holdfast/data`.
 A user file therefore overrides a shipped one of the same name. Profiles follow the same layout (`<root>/profile/`).

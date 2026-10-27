@@ -29,7 +29,6 @@ void print_usage(FILE* f) {
 
     head("RUN");
     row("run PROFILE [-- CMD...]", "run a sandbox (CMD overrides the profile)");
-    row("run PROFILE NAME [-- ARGS...]", "run the profile's [commands] NAME (ARGS appended)");
     row("run --refresh PROFILE", "bundle profiles: rebuild the Alpine userland first");
     row("os-shell PROFILE", "bundle profiles: shell in the apk sandbox (debug)");
     row("print PROFILE", "show the exact bwrap argv, change nothing");

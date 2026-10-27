@@ -16,7 +16,7 @@
 
 using namespace hf;
 
-// Data roots, first match wins: --data dirs, the profile's own [profile] data dirs, then the usual search order.
+// Data roots, first match wins: --data dirs, then the usual search order (with <profile dir>/data for a profile given by path).
 static Profile load(const std::string& name, const Strings& extra) {
     std::string home;
     try { home = resolve_user().home.string(); } catch (...) { if (const char* h = std::getenv("HOME")) home = h; }
@@ -24,26 +24,9 @@ static Profile load(const std::string& name, const Strings& extra) {
     Profile p = load_profile_file(file);
     const bool by_path = name.find('/') != std::string::npos || (name.size() > 8 && name.substr(name.size() - 8) == ".profile");
     Strings roots = extra;
-    for (const auto& d : p.data_dirs) if (std::find(roots.begin(), roots.end(), d) == roots.end()) roots.push_back(d);
     for (const auto& d : data_roots(home, by_path ? profile_local_root(file) : "")) if (std::find(roots.begin(), roots.end(), d) == roots.end()) roots.push_back(d);
-    if (!p.data_dirs.empty()) log::debug(cat("profile '", p.name, "' adds data roots: ", join(p.data_dirs, ", ")));
     resolve_profile_data(p, roots);                  // os file / library file lists the profile refers to (fails closed)
     return p;
-}
-
-// `run PROFILE NAME [-- ARGS]`: the profile's [commands] NAME with ARGS appended. Without NAME, `-- CMD` replaces the command.
-static void apply_named_command(const Profile& p, const std::string& name, RunOptions& o) {
-    auto it = p.commands.find(name);
-    if (it == p.commands.end()) {
-        Strings have;
-        for (const auto& [k, v] : p.commands) have.push_back(k);
-        throw Error(cat("profile '", p.name, "' has no command '", name, "'",
-                        have.empty() ? std::string(" (it has no [commands] section)") : cat("; it has: ", join(have, " "))));
-    }
-    if (o.debug) throw Error("--debug replaces the command with a shell; drop the command name");
-    Strings cmd = it->second;
-    cmd.insert(cmd.end(), o.command.begin(), o.command.end());
-    o.command = cmd;
 }
 
 // `list` shows what `run NAME` / profiles' `use` and `os` would find, in the same search order (first match wins, so a
@@ -138,11 +121,8 @@ int main(int argc, char** argv) {
             net_cleanup(pos[0]);
             return 0;
         }
-        const bool named = cmd == "run" || cmd == "print" || cmd == "check";
-        if (pos.empty() || pos.size() > (named ? 2u : 1u))
-            throw Error(named ? "expected PROFILE [NAME] (see --help)" : "expected exactly one PROFILE (see --help)");
+        if (pos.size() != 1) throw Error("expected exactly one PROFILE (see --help)");
         Profile p = load(pos[0], cli.data);
-        if (pos.size() == 2) apply_named_command(p, pos[1], o);
 
         if (cmd == "os-shell") {
             const User u = resolve_user();

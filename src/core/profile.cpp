@@ -40,27 +40,14 @@ MountSpec parse_mount(const Line& l, bool rw, bool optional) {
 
 void append_words(Strings& dst, const std::string& v) { for (auto& w : split_ws(v)) dst.push_back(w); }
 
-// `dir` is the directory of the file being parsed (empty for text that came from no file): `data` and `include` are
-// relative to it. `include` itself is applied by load_profile_file before this runs, so here it is only checked.
-void parse_onto(Profile& p, const std::string& text, const std::string& o, const fs::path& dir) {
-    size_t own_data = 0;                                            // this file's data dirs go before an included file's
+void parse_onto(Profile& p, const std::string& text, const std::string& o) {
     for (const Line& l : parse_ini(text, o)) {
         const std::string &s = l.section, &k = l.key, &v = l.value;
         if (s == "profile") {
             if (k == "name") p.name = v;
-            else if (k == "include") {
-                if (dir.empty()) bad(l, o, "include needs a profile file (it is resolved relative to that file)");
-            }
-            else if (k == "data") {
-                if (v.empty()) bad(l, o, "expected a directory (relative to this file)");
-                fs::path d = v;
-                if (!dir.empty()) {
-                    d = fs::path(v).is_absolute() ? fs::path(v) : dir / v;
-                    std::error_code ec;
-                    if (!fs::is_directory(d, ec)) bad(l, o, cat("not a directory: ", d.string()));
-                    d = fs::canonical(d, ec);
-                }
-                p.data_dirs.insert(p.data_dirs.begin() + static_cast<std::ptrdiff_t>(own_data++), d.string());
+            else if (k == "include" || k == "data") {
+                bad(l, o, k == "data" ? "not needed any more; put the files in <profile dir>/data (see docs/DATA.md)"
+                                      : "not supported: copy the keys you need into this profile");
             }
             else if (k == "description") p.description = v;
             else if (k == "mode") {
@@ -203,47 +190,18 @@ void parse_onto(Profile& p, const std::string& text, const std::string& o, const
                 p.dep_use.insert(p.dep_use.end(), names.begin(), names.end());
             } else bad(l, o, "unknown key");
         } else if (s == "commands") {
-            static const std::regex name_ok("^[a-z0-9][a-z0-9_-]{0,31}$");
-            if (!std::regex_match(k, name_ok)) bad(l, o, "command names match [a-z0-9][a-z0-9_-]{0,31}");
-            Strings words = split_words(v);
-            if (words.empty()) bad(l, o, "empty command");
-            p.commands[k] = words;                                  // a later file (or line) replaces an earlier one
+            throw ProfileError(cat(o, ":", l.no, ": [commands] is not supported: copy the keys you need into this profile"));
         } else {
             throw ProfileError(cat(o, ":", l.no, ": unknown section [", s, "]"));
         }
     }
 }
 
-// Applies every `[profile] include` of `file` (depth first, in order) onto p, then the file itself.
-void load_onto(Profile& p, const fs::path& file, std::set<fs::path>& stack, int depth) {
-    std::error_code ec;
-    const fs::path real = fs::canonical(file, ec);
-    if (ec || !fs::is_regular_file(real, ec)) throw ProfileError("profile not found: " + file.string());
-    if (depth > 8) throw ProfileError(cat(file.string(), ": includes nested deeper than 8 files"));
-    if (!stack.insert(real).second) throw ProfileError(cat(file.string(), ": include cycle"));
-    const std::string text = read_file(real);
-    for (const Line& l : parse_ini(text, file.string())) {
-        if (l.section != "profile" || l.key != "include") continue;
-        if (l.value.empty()) bad(l, file.string(), "expected a profile file (relative to this file)");
-        const fs::path inc = fs::path(l.value).is_absolute() ? fs::path(l.value) : real.parent_path() / l.value;
-        Profile base = p;
-        base.name.clear();
-        load_onto(base, inc, stack, depth + 1);
-        if (!base.name.empty())                                     // the profile you run names itself; a shared base must not
-            bad(l, file.string(), cat(inc.string(), " sets [profile] name; an included file may not"));
-        const std::string keep = p.name;
-        p = base;
-        p.name = keep;
-    }
-    parse_onto(p, text, file.string(), real.parent_path());
-    stack.erase(real);
-}
-
 }  // namespace
 
 Profile parse_profile(const std::string& text, const std::string& o) {
     Profile p;
-    parse_onto(p, text, o, {});
+    parse_onto(p, text, o);
     check_dns(p, o);
     return p;
 }
@@ -268,10 +226,7 @@ void check_dns(const Profile& p, const std::string& o) {
 }
 
 Profile load_profile_file(const fs::path& path) {
-    Profile p;
-    std::set<fs::path> stack;
-    load_onto(p, path, stack, 0);
-    check_dns(p, path.string());
+    Profile p = parse_profile(read_file(path), path.string());
     if (p.name.empty()) p.name = path.stem().string();
     static const std::regex ok("^[a-z0-9][a-z0-9_-]{0,31}$");
     if (!std::regex_match(p.name, ok))

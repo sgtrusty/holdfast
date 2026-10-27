@@ -60,7 +60,6 @@ struct Profile {
     std::string seccomp = "default";   // "default" (built-in filter) | "none" | path to a compiled BPF file
     CwdMode cwd = CwdMode::Ask;
     std::string cwd_dest = "/shared";
-    Strings data_dirs;             // [profile] data: extra data roots, searched before the usual ones (absolute after load_profile_file)
 
     // [bin] (host mode)
     Strings bins;                  // "name" or "name=/abs/path"
@@ -106,8 +105,6 @@ struct Profile {
     // [deps] use: the data/dep recipes installed into this profile's persistent $HOME (bundle mode only).
     Strings dep_use;
 
-    // [commands] NAME = words: `holdfast run PROFILE NAME [-- ARGS]` runs these words (plus ARGS) instead of [profile] command.
-    std::map<std::string, Strings> commands;
 
     // Everything below is NOT parsed from the profile: resolve_profile_data() fills it from the profile's data/os file
     // (bundle kind) and its data/dep recipes, so one OS setup and each install step are declared exactly once.
@@ -126,9 +123,7 @@ struct Profile {
 Profile parse_profile(const std::string& text, const std::string& origin);
 // pasta needs an IPv4 dns; host needs an IPv4 dns or `host`; none/ivpn take none. Re-checked after --net/--dns overrides.
 void check_dns(const Profile& p, const std::string& origin);
-// Reads a profile file. `[profile] include = FILE` (repeatable, relative to the including file) is applied first, so the
-// including file's keys override or extend it; an included file may not set `name`. `[profile] data = DIR` is resolved
-// against the file that states it and must exist. Fails closed on cycles, depth > 8, missing files.
+// Reads a profile file. Fails closed on unknown keys and sections.
 Profile load_profile_file(const fs::path& p);
 // Resolve "name" or a path to a profile file.
 // A path (contains '/' or ends in .profile) is used as is; a name is <data root>/profile/NAME.profile, first root wins.

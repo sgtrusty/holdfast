@@ -28,10 +28,10 @@ holdfast run [options] PROFILE [-- COMMAND [ARGS...]]
   same mounts, network, seccomp and terminal filter, nothing added. A host profile needs `bash` or `sh` in `[bin] allow`.
   `holdfast print --debug PROFILE` shows the argv it would use. Not for scripts: it is an interactive shell.
 - State and data locations can be overridden for tests and CI: `HOLDFAST_HOME` (state), `HOLDFAST_DATA` (profiles go in its `profile/`).
-- A project can keep its profile and the data it references together: `[profile] data = ./data` in the profile (relative
-  to the profile file) makes holdfast search that directory's `os/ dep/ lib/ display/` first, so
-  `holdfast run ./tools/dev.profile` works from any directory without setting `HOLDFAST_DATA`. `[profile] include = FILE`
-  shares one base between several profiles, and `[commands]` gives named entry points: `holdfast run ./tools/dev.profile build`.
+- A project can keep its profile and the data it references together: a `data/` directory next to a profile given **by path**
+  (`os/ dep/ lib/ display/` inside) is searched after `--data` and `$HOLDFAST_DATA`, so
+  `holdfast run ./tools/dev.profile` works from any directory without setting `HOLDFAST_DATA`. It is refused (exit 3) if it
+  or the profile is group/world-writable, or if it is a symlink leaving the profile's directory.
 
 ## Calling it
 

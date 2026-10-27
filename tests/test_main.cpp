@@ -419,33 +419,36 @@ int main() {
         CHECK(valid_data_name("python3") && !valid_data_name("../x") && !valid_data_name("A") && !valid_data_name(""));
     });
 
-    test("profiles: [commands], include and project data", [] {
-        Profile c = parse_profile("[commands]\nbuild = sh /shared/build.sh 'a b'\nTest = make test\n", "t");
-        CHECK((c.commands.at("build") == Strings{"sh", "/shared/build.sh", "a b"}) && c.commands.count("test"));
-        THROWS(ProfileError, parse_profile("[commands]\nbuild =\n", "t"));
-        THROWS(ProfileError, parse_profile("[commands]\n../x = sh\n", "t"));
-        THROWS(ProfileError, parse_profile("[profile]\ninclude = base.profile\n", "t"));    // text from no file: nothing to resolve against
-        char tmpl[] = "/tmp/hf-inc-XXXXXX";
+    test("profiles: removed keys are rejected with a hint", [] {
+        auto msg = [](const char* t) { try { parse_profile(t, "t"); } catch (const ProfileError& e) { return std::string(e.what()); } return std::string(); };
+        CHECK(msg("[profile]\ndata = x\n").find("<profile dir>/data") != std::string::npos);
+        CHECK(msg("[profile]\ninclude = x\n").find("not supported") != std::string::npos);
+        CHECK(msg("[commands]\nbuild = sh\n").find("not supported") != std::string::npos);
+    });
+
+    test("data files: <profile dir>/data root", [] {
+        char tmpl[] = "/tmp/hf-pdata-XXXXXX";
         const std::string d = mkdtemp(tmpl);
-        fs::create_directories(d + "/tools/data/dep");
-        write_file(d + "/tools/common.profile", "[profile]\nmode = bundle\nos = alpine-x\ndata = ./data\n[deps]\nuse = a\n"
-                                                "[commands]\nbuild = sh build.sh\n[network]\nmode = pasta\n", 0644);
-        write_file(d + "/tools/run.profile", "[profile]\ninclude = common.profile\ncommand = sh\n[deps]\nuse = b\n"
-                                             "[commands]\nbuild = sh other.sh\n[network]\ndns = 1.1.1.1\n", 0644);
-        Profile r = load_profile_file(d + "/tools/run.profile");                          // dns in the including file completes the base
-        CHECK(r.name == "run" && r.root == RootMode::Bundle && r.os == "alpine-x" && r.net == NetMode::Pasta && r.dns == "1.1.1.1");
-        CHECK((r.dep_use == Strings{"a", "b"}) && (r.commands.at("build") == Strings{"sh", "other.sh"}));   // lists extend, keys override
-        CHECK((r.data_dirs == Strings{fs::canonical(d + "/tools/data").string()}));     // relative to the file that says it
-        THROWS(ProfileError, load_profile_file(d + "/tools/common.profile"));            // pasta without dns: the base alone is incomplete
-        write_file(d + "/tools/named.profile", "[profile]\nname = base\n", 0644);
-        write_file(d + "/tools/bad.profile", "[profile]\ninclude = named.profile\ncommand = sh\n", 0644);
-        THROWS(ProfileError, load_profile_file(d + "/tools/bad.profile"));               // an included file may not name the profile
-        write_file(d + "/tools/loop.profile", "[profile]\ninclude = loop.profile\n", 0644);
-        THROWS(ProfileError, load_profile_file(d + "/tools/loop.profile"));
-        write_file(d + "/tools/nodata.profile", "[profile]\ndata = ./missing\n", 0644);
-        THROWS(ProfileError, load_profile_file(d + "/tools/nodata.profile"));             // a data dir that is not there fails closed
-        write_file(d + "/tools/noinc.profile", "[profile]\ninclude = missing.profile\n", 0644);
-        THROWS(ProfileError, load_profile_file(d + "/tools/noinc.profile"));
+        fs::create_directories(d + "/p/data/os");
+        write_file(d + "/p/x.profile", "[profile]\ncommand=sh\n", 0644);
+        fs::permissions(d + "/p", fs::perms::owner_all);
+        fs::permissions(d + "/p/data", fs::perms::owner_all);
+        const std::string root = profile_local_root(d + "/p/x.profile");
+        CHECK(root == fs::canonical(d + "/p/data").string());
+        unsetenv("HOLDFAST_DATA");
+        CHECK(data_roots("", root).front() == root);                                      // no env: it comes first
+        setenv("HOLDFAST_DATA", "/env-data", 1);
+        const Strings r = data_roots("", root);
+        CHECK(r[0] == "/env-data" && r[1] == root);                                       // $HOLDFAST_DATA beats it
+        unsetenv("HOLDFAST_DATA");
+        CHECK(profile_local_root(d + "/p/data/os/none.profile").empty());                 // no data/ next to it
+        fs::permissions(d + "/p/data", fs::perms::group_write, fs::perm_options::add);
+        THROWS(PolicyError, profile_local_root(d + "/p/x.profile"));                      // group-writable
+        fs::permissions(d + "/p/data", fs::perms::group_write, fs::perm_options::remove);
+        fs::remove_all(d + "/p/data");
+        fs::create_directories(d + "/elsewhere");
+        fs::create_directory_symlink("../elsewhere", d + "/p/data");
+        THROWS(PolicyError, profile_local_root(d + "/p/x.profile"));                      // symlink leaving the profile dir
         fs::remove_all(d);
     });
 
@@ -649,8 +652,8 @@ int main() {
         THROWS(Error, parse_args("run", {"--bogus", "p"}));
         THROWS(Error, parse_args("run", {"--net=bogus", "p"}));
         CHECK(!handle_meta({"run"}).has_value());                                    // real commands are not meta commands
-        Cli r = parse_args("run", {"--refresh-dep=lazygit", "--refresh-dep=delta", "p", "build", "--", "-j4"});
-        CHECK((r.run.refresh_deps == Strings{"lazygit", "delta"}) && !r.refresh && (r.pos == Strings{"p", "build"}) && (r.run.command == Strings{"-j4"}));
+        Cli r = parse_args("run", {"--refresh-dep=lazygit", "--refresh-dep=delta", "p", "--", "-j4"});
+        CHECK((r.run.refresh_deps == Strings{"lazygit", "delta"}) && !r.refresh && (r.pos == Strings{"p"}) && (r.run.command == Strings{"-j4"}));
         THROWS(Error, parse_args("run", {"--refresh-dep=../x", "p"}));
         CHECK((parse_args("list", {"--data=/", "deps"}).data == Strings{"/"}));
         THROWS(Error, parse_args("list", {"--data=/nonexistent-hf-dir"}));
