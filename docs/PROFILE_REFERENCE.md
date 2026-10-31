@@ -109,7 +109,7 @@ already works). holdfast sets **no** Mesa variables: do not force `LIBGL_ALWAYS_
 The shipped demo `gpu-xephyr` (`data/profile/gpu-xephyr.profile` + `data/display/x11-xephyr-glamor.profile`) shows the two halves
 together: `[gpu] mode = render`, Xephyr started with glamor, and `glxinfo -B` as the command. Use it to check which renderer this
 host actually provides before copying the keys into a real profile; `holdfast doctor` reports render nodes, drivers and whether
-your Xephyr advertises `-glamor`.
+your Xephyr advertises `-glamor`. `x11-xephyr-i3-glamor` is the same GPU-backed Xephyr with i3 as the window manager.
 
 The render node exposes the host kernel's GPU driver to the sandbox. GPU drivers are large and have had local privilege-escalation
 bugs; GPU memory isolation is the driver's, not holdfast's. This is why the default is `none`, only render (not modesetting) nodes

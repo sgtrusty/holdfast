@@ -214,7 +214,7 @@ wm     = i3              # xephyr only: shell snippet started in the sandbox; ne
   sandbox profile's `[gpu] mode = render`.
 - `server = host` is your real session: Wayland when `WAYLAND_DISPLAY` is set, otherwise X11. It takes no other keys (Wayland
   needs no window manager, cookie or size). The sandbox profile must also say `[display] allow_host = yes`; consent is never in the shared file.
-- Keys that do not apply are errors. Shipped: `x11-xephyr`, `x11-xephyr-i3`, `x11-xephyr-glamor`, `host`. `holdfast list displays` shows what is visible.
+- Keys that do not apply are errors. Shipped: `x11-xephyr`, `x11-xephyr-i3`, `x11-xephyr-glamor`, `x11-xephyr-i3-glamor`, `host`. `holdfast list displays` shows what is visible.
 
 ## How a minimal profile resolves (run time, no ELF parsing)
 
