@@ -15,4 +15,10 @@ std::string render_node_driver(const fs::path& node);
 // Whether the invoking user can open the node O_RDWR (the sandbox submits GPU work through it). `why` gets strerror().
 bool render_node_openable(const fs::path& node, std::string* why = nullptr);
 
+// Host paths (all read-only) that must accompany a render node for Mesa/libdrm to use it instead of falling back to
+// llvmpipe: sysfs is how libdrm maps a passed DRM fd back to a node/driver, and host profiles also need the EGL/Vulkan
+// manifest directories and Mesa's drirc.d. `host_root` adds the userland files (a bundle already has them in its /usr).
+// These are fixed paths, not profile input; callers bind exactly this list.
+Strings gpu_support_binds(bool host_root);
+
 }  // namespace hf

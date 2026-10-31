@@ -45,7 +45,7 @@ struct DisplayDef {
     // x11 + nested only (the parser rejects them elsewhere): Wayland has no server/window-manager split and no cookie file.
     std::string size = "1280x800";
     bool xauth = true;
-    bool glamor = false;           // xephyr only: start with -glamor (GPU-backed Xephyr; needs a build that supports it)
+    bool glamor = false;           // xephyr only: start with -glamor (accelerates Xephyr's 2D drawing; client GL stays software)
     std::string wm;                // shell snippet started in the sandbox before the program; X needs a separate window manager
 };
 

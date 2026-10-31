@@ -10,6 +10,7 @@
 #include "util/style.hpp"
 #include "core/plan.hpp"
 #include "core/elf.hpp"
+#include "core/gpu.hpp"
 #include "core/libs.hpp"
 #include "core/launch.hpp"
 #include "core/seccomp.hpp"
@@ -118,6 +119,23 @@ int main() {
         p.check_bind("/dev/dri/renderD128", true, true);
         THROWS(PolicyError, p.check_bind("/dev/dri/card0", true, true));  // never a KMS node
         THROWS(PolicyError, p.check_bind("/dev/sda", true, true));
+    });
+
+    test("gpu: render nodes are paired with read-only sysfs/manifests", [] {
+        auto contains = [](const Strings& v, const char* p) {
+            return std::find(v.begin(), v.end(), p) != v.end();
+        };
+        // Fixed allow-list: [gpu] may add these to the sandbox, and nothing else from /sys.
+        for (const char* p : {"/sys/dev/char", "/sys/devices", "/sys/bus/pci/devices"})
+            if (fs::exists(p)) CHECK(contains(gpu_support_binds(false), p));
+        CHECK(gpu_support_binds(false).size() <= 3);                       // no userland paths in bundle mode
+        const Strings host = gpu_support_binds(true);
+        for (const std::string& p : host) {
+            CHECK(p == "/sys/dev/char" || p == "/sys/devices" || p == "/sys/bus/pci/devices" ||
+                  p == "/usr/share/drirc.d" || p == "/usr/share/glvnd/egl_vendor.d" ||
+                  p == "/usr/share/vulkan/icd.d" || p == "/etc/vulkan/icd.d");
+            CHECK(p != "/sys" && p != "/usr/share");                       // never a broad directory
+        }
     });
 
     test("policy: ancestor exposure is refused only when the denied path exists", [] {

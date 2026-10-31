@@ -106,10 +106,43 @@ The old `protocol`, `mode`, `size`, `wm`, `xauth`, `allow_host_x11` and `allow_h
 a host profile with `libs = minimal` needs a `data/lib` definition that provides the GL/EGL/gallium files (a `libs = full` profile
 already works). holdfast sets **no** Mesa variables: do not force `LIBGL_ALWAYS_SOFTWARE` in a profile that wants GPU rendering.
 
-The shipped demo `gpu-xephyr` (`data/profile/gpu-xephyr.profile` + `data/display/x11-xephyr-glamor.profile`) shows the two halves
-together: `[gpu] mode = render`, Xephyr started with glamor, and `glxinfo -B` as the command. Use it to check which renderer this
-host actually provides before copying the keys into a real profile; `holdfast doctor` reports render nodes, drivers and whether
-your Xephyr advertises `-glamor`. `x11-xephyr-i3-glamor` is the same GPU-backed Xephyr with i3 as the window manager.
+In addition to the node, `mode = render` binds a fixed, read-only set of host paths that Mesa/libdrm need to use it:
+`/sys/dev/char`, `/sys/devices` and `/sys/bus/pci/devices` (libdrm maps the DRM file descriptor back to a node and driver through sysfs;
+without them Mesa cannot identify the device and silently falls back to llvmpipe), plus, for host-root profiles,
+`/usr/share/drirc.d`, `/usr/share/glvnd/egl_vendor.d`, `/usr/share/vulkan/icd.d` and `/etc/vulkan/icd.d` (EGL/Vulkan manifests;
+`libs = full` only binds `/usr/lib*`). A bundle already has these under its own `/usr`. `/sys/class/drm` is deliberately not
+bound because it exposes connector/monitor state.
+
+**Nested Xephyr displays cannot accelerate GL clients.** Xephyr has its own software GLX, so programs inside it get `llvmpipe`
+even with `glamor = yes`; glamor accelerates only Xephyr's 2D drawing on the host. GPU rendering for clients needs a display that
+passes a real DRM device: `[display] use = host` with `allow_host = yes` on X11 (DRI3), or the host Wayland compositor.
+
+Two demos show the difference:
+
+- `gpu-host` (`data/profile/gpu-host.profile`) uses your real X11 session and `[gpu] mode = render`; `glxinfo -B` should report
+  `Accelerated: yes` and your driver. It shares your session, which is what `allow_host = yes` consents to.
+- `gpu-xephyr` (`data/profile/gpu-xephyr.profile` + `data/display/x11-xephyr-glamor.profile`) keeps the isolated Xephyr display;
+  it proves the render node is bound and openable, but `llvmpipe` is the expected renderer there. `x11-xephyr-i3-glamor` is the
+  same 2D-only glamor display with i3.
+
+`holdfast doctor` reports render nodes, drivers and whether your Xephyr advertises `-glamor`.
+
+### Hybrid / multiple GPUs
+
+With no `device` lines every render node is bound. On a hybrid laptop that exposes both the integrated and the discrete GPU,
+provided both nodes are openable; if one is powered down or permission-restricted the run fails closed rather than quietly
+picking the other. `device` is repeatable, so pin one or both nodes:
+
+```ini
+[gpu]
+mode = render
+device = /dev/dri/renderD129    # repeatable; only renderD<number> is accepted
+```
+
+`holdfast doctor` prints each node with its kernel driver, which is how you map `renderD128`/`renderD129` to iGPU/dGPU; it does
+not print PCI IDs. With a `server = host` X11 display, DRI3 uses the X server's GPU, so pinning a different node can still leave
+the client without the node it needs; binding every render node is the safe default. holdfast sets no `DRI_PRIME` or other Mesa
+variables, so device selection is Mesa's/your application's.
 
 The render node exposes the host kernel's GPU driver to the sandbox. GPU drivers are large and have had local privilege-escalation
 bugs; GPU memory isolation is the driver's, not holdfast's. This is why the default is `none`, only render (not modesetting) nodes

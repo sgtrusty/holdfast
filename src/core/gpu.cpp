@@ -50,4 +50,19 @@ bool render_node_openable(const fs::path& node, std::string* why) {
     return false;
 }
 
+Strings gpu_support_binds(bool host_root) {
+    // libdrm's drmGetDevice2()/Mesa's loader resolve a DRM fd through /sys/dev/char/<maj>:<min>, its /sys/devices target and
+    // /sys/bus/pci (PCI revision/workarounds). Without these Mesa cannot name the driver and quietly selects llvmpipe even
+    // though the render node is bound. /sys/class/drm is deliberately not mounted: it exposes connector/monitor state.
+    Strings out;
+    for (const char* p : {"/sys/dev/char", "/sys/devices", "/sys/bus/pci/devices"})
+        if (fs::exists(p)) out.emplace_back(p);
+    if (!host_root) return out;             // a bundle's own /usr already carries these
+    // Manifests and Mesa's per-application workarounds live in /usr/share, which `libs = full` does not mount (it only
+    // binds /usr/lib*). Missing paths are simply skipped: a distro without Vulkan still gets working GL/EGL.
+    for (const char* p : {"/usr/share/drirc.d", "/usr/share/glvnd/egl_vendor.d", "/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d"})
+        if (fs::exists(p)) out.emplace_back(p);
+    return out;
+}
+
 }  // namespace hf

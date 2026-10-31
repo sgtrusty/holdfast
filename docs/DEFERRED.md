@@ -56,6 +56,7 @@ checks (resize, Ctrl-C, mouse, exit) with `lazyvim` and `lazygit-dev`. Specific 
   private compositor (cage/weston/sway, a new `server =` value, the Xephyr equivalent) and the `wp_security_context_v1` protocol so a compositor can mark the sandbox as
   restricted. The Wayland backend has not been run against a real compositor yet; the X11 one was only moved, not changed.
   GPU access is independent of the protocol: `[gpu] mode = render` binds the DRM render node for both X11 and Wayland.
+  A nested Xephyr display cannot accelerate GL clients (its GLX is software); use a host display for that.
 - **`net=host`** shares the host network namespace, including abstract unix sockets (X11, some D-Bus), whatever
   `display = none` says. Prefer `net=pasta`. pasta (and host) still reach the LAN.
 - **Whitelisted binaries are a PATH allowlist, not an exec allowlist.** With `libs = full`, anything executable under

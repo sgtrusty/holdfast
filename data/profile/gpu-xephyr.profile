@@ -1,22 +1,25 @@
-# GPU demo: a private Xephyr window whose X server renders through the GPU (glamor), plus
-# DRM render nodes so Mesa clients in the sandbox can use the GPU directly.
+# GPU plumbing demo behind a private Xephyr window: Xephyr itself renders through the GPU (glamor) and
+# the sandbox gets DRM render nodes, but **client GL inside Xephyr is software (llvmpipe)**. Xephyr is a
+# nested X server with its own software GLX; -glamor only accelerates its 2D drawing on the host. Use
+# `gpu-host` if you want glxinfo to report the real GPU.
 #
-#   holdfast run gpu-xephyr                 # glxinfo -B: which renderer did we get?
-#   holdfast run gpu-xephyr -- glxgears     # animated gears, rendered by the GPU if all is well
-#   holdfast run gpu-xephyr -- eglinfo      # EGL/GLES information
+#   holdfast run gpu-xephyr                 # glxinfo -B: llvmpipe is the expected result here
+#   holdfast run gpu-xephyr -- glxgears     # works, but on the CPU
+#   holdfast run gpu-xephyr -- eglinfo      # same: software rendering
+#
+# This profile is still useful: it proves the render node is bound and openable (the same plumbing the
+# host demo needs), and that the Xephyr window itself is GPU-composited when -glamor is available.
 #
 # Requirements:
 #   - an Xephyr build that advertises -glamor (`holdfast doctor` says whether yours does)
 #   - a DRM render node your user may open read-write (usually the render/video group or a logind ACL)
 #   - mesa-utils (glxinfo, glxgears) and, for eglinfo, mesa-utils-extra (package names vary by distro)
 #
-# Set [gpu] mode = none (or delete the section) to compare: the same profile still starts, but
-# Mesa clients inside have no render node and fall back to software. Xephyr's own glamor runs on
-# the host and is unaffected. holdfast deliberately sets no Mesa variables, so the difference is
-# the GPU access itself, not LIBGL_ALWAYS_SOFTWARE.
+# Set [gpu] mode = none (or delete the section) to compare: the profile still starts, but Mesa clients
+# inside have no render node. Xephyr's own glamor runs on the host and is unaffected.
 [profile]
 name        = gpu-xephyr
-description = GPU demo: Xephyr with glamor + DRM render nodes (glxinfo/glxgears)
+description = GPU plumbing demo: Xephyr glamor + render nodes (client GL is llvmpipe)
 mode        = host
 command     = glxinfo -B
 hostname    = gpu
@@ -32,7 +35,7 @@ allow = glxinfo glxgears eglinfo
 libs = full
 
 [display]
-use = x11-xephyr-glamor       # data/display/: Xephyr started with -glamor
+use = x11-xephyr-glamor       # data/display/: Xephyr started with -glamor (2D acceleration only)
 
 [gpu]
 mode = render                 # the opt-in: bind /dev/dri/renderD* (never card*/nvidia*)

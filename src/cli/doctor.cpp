@@ -161,7 +161,7 @@ int doctor() {
     if (xephyr) {
         const bool advertised = display::xephyr_advertises_glamor(*xephyr);
         row(advertised || !glamor_configured ? " ok " : "warn", advertised || !glamor_configured ? st.g : st.y, "Xephyr glamor",
-            advertised ? "advertised (-glamor)" :
+            advertised ? "advertised (-glamor is 2D only; sandboxed GL clients still use llvmpipe)" :
                          glamor_configured ? "not advertised, but a display file sets glamor = yes: update/rebuild Xephyr or set glamor = no"
                                            : "not advertised (only display files with glamor = yes need it)");
     } else {

@@ -146,6 +146,10 @@ void mount_gpu(ArgBuilder& b, const Profile& p, const PlanCtx& c, const VarCtx& 
                             " (add the invoking user to the 'render' or 'video' group, or check that the GPU driver is loaded)"));
         b.dev_bind(n, n);
     }
+    // A render node alone is not enough: Mesa maps the DRM fd through sysfs to pick the driver, and host profiles need the
+    // EGL/Vulkan manifests (they live in /usr/share, which libs = full does not bind). Fixed read-only paths, so they are
+    // outside Policy's user-mount blacklist on purpose; never add anything here that is profile-controlled.
+    for (const std::string& s : gpu_support_binds(p.root == RootMode::Host)) b.ro_bind(s, s);
 }
 
 void mount_host_rootfs(ArgBuilder& b, const Profile& p, const PlanCtx& c, const VarCtx& vc) {
