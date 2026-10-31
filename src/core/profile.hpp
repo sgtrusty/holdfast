@@ -14,6 +14,7 @@ enum class TermMode { Filter, Passthrough };
 enum class DisplayProtocol { X11, Wayland };       // which display protocol the sandboxed program speaks
 enum class DisplayMode { Host, Nested };           // the host's display server (explicit opt-in) | a private one (X11: Xephyr)
 enum class CwdMode { None, Ask, Yes };
+enum class GpuMode { None, Render };               // render: bind DRM render nodes only, never the KMS card nodes
 
 struct MountSpec {
     std::string src;       // may contain $VARS / globs, expanded at plan time
@@ -44,6 +45,7 @@ struct DisplayDef {
     // x11 + nested only (the parser rejects them elsewhere): Wayland has no server/window-manager split and no cookie file.
     std::string size = "1280x800";
     bool xauth = true;
+    bool glamor = false;           // xephyr only: start with -glamor (GPU-backed Xephyr; needs a build that supports it)
     std::string wm;                // shell snippet started in the sandbox before the program; X needs a separate window manager
 };
 
@@ -101,6 +103,10 @@ struct Profile {
     std::string clipboard_path = "/tmp/clip_pipe";
     bool git_protect = true;
     Strings font_families;
+
+    // [gpu]
+    GpuMode gpu = GpuMode::None;   // mode = render is the consent: no render node is bound otherwise
+    Strings gpu_devices;           // optional device = /dev/dri/renderD... entries; empty = every render node found
 
     // [deps] use: the data/dep recipes installed into this profile's persistent $HOME (bundle mode only).
     Strings dep_use;

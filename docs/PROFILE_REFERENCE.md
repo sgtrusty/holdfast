@@ -96,6 +96,26 @@ Input is relayed byte for byte. If the terminal ever stays raw after a hard kill
 What the display *is* (server, window size, window manager, cookie) is described once in `data/display/NAME.profile`, see `docs/DATA.md`.
 The old `protocol`, `mode`, `size`, `wm`, `xauth`, `allow_host_x11` and `allow_host_wayland` keys are errors here, with a message that says so.
 
+## [gpu]
+| key | default | |
+|---|---|---|
+| mode | `none` | `none` / `render`. `render` is itself the consent: bind DRM render nodes (`/dev/dri/renderD*`) so Mesa can use the GPU. Nothing is bound without this key, and `[display]` never implies it |
+| device | every render node found | optional, repeatable: bind only these nodes, e.g. `device = /dev/dri/renderD128`. Only `/dev/dri/renderD<number>` is accepted; `card*`, `/dev/nvidia*` and anything else are refused (exit 3) |
+
+`mode = render` applies to host and bundle profiles. A bundle needs the Mesa drivers in its userland (`mesa-dri-gallium` on Alpine);
+a host profile with `libs = minimal` needs a `data/lib` definition that provides the GL/EGL/gallium files (a `libs = full` profile
+already works). holdfast sets **no** Mesa variables: do not force `LIBGL_ALWAYS_SOFTWARE` in a profile that wants GPU rendering.
+
+The shipped demo `gpu-xephyr` (`data/profile/gpu-xephyr.profile` + `data/display/x11-xephyr-glamor.profile`) shows the two halves
+together: `[gpu] mode = render`, Xephyr started with glamor, and `glxinfo -B` as the command. Use it to check which renderer this
+host actually provides before copying the keys into a real profile; `holdfast doctor` reports render nodes, drivers and whether
+your Xephyr advertises `-glamor`.
+
+The render node exposes the host kernel's GPU driver to the sandbox. GPU drivers are large and have had local privilege-escalation
+bugs; GPU memory isolation is the driver's, not holdfast's. This is why the default is `none`, only render (not modesetting) nodes
+are offered, and the node must be openable read-write by your user (`render`/`video` group or a logind ACL). NVIDIA's proprietary
+driver needs the host's glibc userspace and is not supported in a musl bundle; nouveau/NVK works through the same render node.
+
 ## [audio]  `mode = none|pulse` – pulse also grants microphone access.
 ## [clipboard]  `mode = none|out` · `path` (in-sandbox file, default `/tmp/clip_pipe`) · `sanitize = yes|no` (default `yes`: strip control characters, incl. ESC/CR/DEL/C1 and bidi overrides; `\n` and `\t` are kept).
 ## [git]  `protect = yes|no` – re-bind every `.git` read-only under the mounted tree.

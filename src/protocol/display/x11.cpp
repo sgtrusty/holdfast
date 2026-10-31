@@ -53,6 +53,7 @@ public:
             fs::path auth;
             Strings argv = {"Xephyr", disp, "-screen", d.size, "-resizeable", "-nolisten", "tcp",
                             "-terminate", "-title", "holdfast: " + p.name + " (untrusted)"};
+            if (d.glamor) argv.push_back("-glamor");
             if (d.xauth) {
                 auth = session / "Xauthority";
                 write_xauth(auth, std::to_string(n), cookie);
@@ -140,6 +141,12 @@ void write_xauth(const fs::path& file, const std::string& num, const std::string
     be16(d, static_cast<uint16_t>(name.size())); d += name;
     be16(d, static_cast<uint16_t>(cookie.size())); d += cookie;
     write_file(file, d, 0600);
+}
+
+bool xephyr_advertises_glamor(const fs::path& xephyr) {
+    // -help is part of the X server option parser and exits without opening a display. Some builds print it on stderr.
+    const RunResult r = capture_all({xephyr.string(), "-help"});
+    return lower(r.out).find("glamor") != std::string::npos;
 }
 
 }  // namespace hf::display

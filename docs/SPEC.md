@@ -24,8 +24,9 @@ src/
   core/profile.{hpp,cpp}  Profile struct, strict INI parser, profile lookup
   core/paths.{hpp,cpp}    on-disk layout, $VAR expansion + glob, Policy (deny-list / sensitive roots)
   core/argbuilder.hpp     typed bwrap argv builder (+ separate command vector, pretty printer)
+  core/gpu.{hpp,cpp}      DRM render-node discovery, driver name, openability checks (for [gpu] and doctor)
   core/plan.{hpp,cpp}     Profile+PlanCtx -> bwrap argv (rootfs, identity, home, mounts, git guard,
-                          fonts, display, audio, clipboard, env); git/font/xauth helpers
+                          fonts, display, gpu, audio, clipboard, env); git/font/xauth helpers
   core/launch.{hpp,cpp}   bwrap discovery/version, args-file trampoline, signal-forwarding runner
   core/bundle.{hpp,cpp}   Alpine fetch/verify/extract, provisioning stage, stamp, purge
   core/session.{hpp,cpp}  run_profile orchestration, validate_profile, net_test, doctor

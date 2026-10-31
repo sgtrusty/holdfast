@@ -11,6 +11,7 @@ holdfast run --net=pasta --dns=1.1.1.1 lazyvim  # same, online ("sync" mode) thr
 holdfast run librewolf-ivpn       # amnesic browser, nested X, all traffic via a WireGuard netns
 holdfast run lazygit-dev          # first run sets up its private Alpine userland (in sandboxes), then runs in it
 holdfast run wssch                # wssch AI-coding orchestrator: outbound-only pasta netns, tree read-write
+holdfast run gpu-xephyr           # GPU demo: Xephyr with glamor + DRM render nodes, then glxinfo -B
 holdfast run --debug lazyvim      # a shell (bash, else sh) inside that exact sandbox, to test or configure
 holdfast print lazyvim            # show the exact bwrap command line, change nothing
 holdfast doctor                   # what this host can do, and where holdfast keeps its files

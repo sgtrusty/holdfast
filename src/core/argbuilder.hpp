@@ -12,6 +12,7 @@ public:
     ArgBuilder& ro_bind_try(const fs::path& s, const fs::path& d) { return raw({"--ro-bind-try", s.string(), d.string()}); }
     ArgBuilder& bind(const fs::path& s, const fs::path& d) { return raw({"--bind", s.string(), d.string()}); }
     ArgBuilder& bind_try(const fs::path& s, const fs::path& d) { return raw({"--bind-try", s.string(), d.string()}); }
+    ArgBuilder& dev_bind(const fs::path& s, const fs::path& d) { return raw({"--dev-bind", s.string(), d.string()}); }
     ArgBuilder& tmpfs(const fs::path& d) { return raw({"--tmpfs", d.string()}); }
     ArgBuilder& dir(const fs::path& d) { return raw({"--dir", d.string()}); }
     ArgBuilder& symlink(const std::string& target, const fs::path& d) { return raw({"--symlink", target, d.string()}); }
@@ -32,7 +33,7 @@ public:
         while (i < v_.size()) {
             const std::string& a = v_[i];
             size_t n = 0;
-            if (a == "--bind" || a == "--ro-bind" || a == "--bind-try" || a == "--ro-bind-try" || a == "--symlink" || a == "--setenv" || a == "--chmod") n = 2;
+            if (a == "--bind" || a == "--ro-bind" || a == "--bind-try" || a == "--ro-bind-try" || a == "--dev-bind" || a == "--symlink" || a == "--setenv" || a == "--chmod") n = 2;
             else if (a == "--tmpfs" || a == "--dir" || a == "--proc" || a == "--dev" || a == "--chdir" || a == "--hostname" || a == "--cap-drop" || a == "--uid" || a == "--gid" || a == "--unsetenv") n = 1;
             o += " \\\n  " + a;
             for (size_t j = 1; j <= n && i + j < v_.size(); ++j) o += " " + shell_quote(v_[i + j]);

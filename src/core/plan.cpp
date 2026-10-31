@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <set>
 
+#include "core/gpu.hpp"
 #include "core/launch.hpp"
 #include "core/seccomp.hpp"
 #include "util/log.hpp"
@@ -115,6 +116,35 @@ void mount_listed_libs(ArgBuilder& b, const Profile& p, const PlanCtx& c) {
                             "run `holdfast libs --check` to see what changed, `holdfast libs --refresh` to update it, or set `libs = full`"));
         c.policy->check_bind(l, false);
         b.ro_bind(canon(l), l);
+    }
+}
+
+// [gpu] mode = render: bind only DRM render nodes, which expose the kernel driver's GPU ioctl surface but not KMS.
+// The default (none) binds nothing; [display] never implies this. No Mesa variables are set: the userland's driver chooses.
+void mount_gpu(ArgBuilder& b, const Profile& p, const PlanCtx& c, const VarCtx& vc) {
+    if (p.gpu != GpuMode::Render) return;
+    Strings nodes;
+    if (!p.gpu_devices.empty()) {
+        for (const std::string& d : p.gpu_devices) {
+            const fs::path node = expand(d, vc);
+            c.policy->check_bind(node, true, true);           // explicit allowance: exactly this render-node key
+            nodes.push_back(canon(node).string());
+        }
+    } else {
+        nodes = find_render_nodes();
+        if (nodes.empty())
+            throw Error("gpu mode = render: no DRM render node found under /dev/dri (check that the GPU driver is loaded, "
+                        "or name one with [gpu] device = /dev/dri/renderD<number>)");
+        for (const std::string& n : nodes) c.policy->check_bind(n, true, true);
+    }
+    std::sort(nodes.begin(), nodes.end());
+    nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
+    for (const std::string& n : nodes) {
+        std::string why;
+        if (!render_node_openable(n, &why))
+            throw Error(cat("gpu mode = render: cannot open render node '", n, "' read-write: ", why,
+                            " (add the invoking user to the 'render' or 'video' group, or check that the GPU driver is loaded)"));
+        b.dev_bind(n, n);
     }
 }
 
@@ -260,6 +290,7 @@ Plan build_plan(const Profile& p, const PlanCtx& c) {
     if (p.disable_userns && c.userns_disable_supported) b.flag("--disable-userns");
     b.raw({"--hostname", p.hostname});
     b.raw({"--proc", "/proc"}).raw({"--dev", "/dev"});
+    mount_gpu(b, p, c, vc);
     b.tmpfs("/tmp").tmpfs("/run").dir(fs::path("/run/user") / uid).dir("/var/tmp");
     b.raw({"--chmod", "0700", (fs::path("/run/user") / uid).string()});
 

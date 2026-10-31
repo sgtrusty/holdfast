@@ -75,6 +75,13 @@ int main() {
         THROWS(ProfileError, parse_profile("a=1\n", "t"));
         THROWS(ProfileError, parse_profile("[profile]\nmode=maybe\n", "t"));
         THROWS(ProfileError, parse_profile("[network]\nsubnet=300\n", "t"));
+        Profile g = parse_profile("[gpu]\nmode = render\ndevice = /dev/dri/renderD128\ndevice = /dev/dri/renderD129\n", "t");
+        CHECK(g.gpu == GpuMode::Render && g.gpu_devices.size() == 2);
+        CHECK(parse_profile("[profile]\nname=x\n", "t").gpu == GpuMode::None);            // no GPU unless the profile asks
+        THROWS(ProfileError, parse_profile("[gpu]\nmode = software\n", "t"));            // unknown value
+        THROWS(ProfileError, parse_profile("[gpu]\nmode = render\nbogus = yes\n", "t"));  // unknown key
+        THROWS(ProfileError, parse_profile("[gpu]\ndevice = /dev/dri/renderD128\n", "t"));// device alone is not consent
+        THROWS(ProfileError, parse_profile("[gpu]\nmode = render\ndevice =\n", "t"));
     });
 
     test("expand", [] {
@@ -104,6 +111,13 @@ int main() {
         p.check_bind("/usr/lib", false);
         p.check_bind("/run/media/alice/USB/work", true);
         THROWS(PolicyError, p.check_cwd("/home/alice"));
+        // GPU render nodes: only the [gpu] allowance may bind one, and only a renderD node
+        CHECK(is_render_node("/dev/dri/renderD128") && is_render_node("/dev/dri/renderD0"));
+        CHECK(!is_render_node("/dev/dri/card0") && !is_render_node("/dev/dri/renderD") && !is_render_node("/dev/nvidia0"));
+        THROWS(PolicyError, p.check_bind("/dev/dri/renderD128", true));   // a normal mount stays refused
+        p.check_bind("/dev/dri/renderD128", true, true);
+        THROWS(PolicyError, p.check_bind("/dev/dri/card0", true, true));  // never a KMS node
+        THROWS(PolicyError, p.check_bind("/dev/sda", true, true));
     });
 
     test("policy: ancestor exposure is refused only when the denied path exists", [] {
@@ -795,6 +809,8 @@ int main() {
 
         DisplayDef x = parse_display("[display]\nserver = xephyr\nsize = 800x600\nwm = i3\n", "o", "d");
         CHECK(x.mode == DisplayMode::Nested && x.protocol == DisplayProtocol::X11 && x.size == "800x600" && x.wm == "i3" && x.xauth);
+        CHECK(!x.glamor);                                                                 // default: no GPU-backed Xephyr
+        CHECK(parse_display("[display]\nserver = xephyr\nglamor = yes\n", "o", "d").glamor);
         DisplayDef h = parse_display("[display]\nserver = host\n", "o", "d");
         CHECK(h.mode == DisplayMode::Host);
         THROWS(ProfileError, parse_display("[display]\n", "o", "d"));                           // server is required
@@ -804,6 +820,8 @@ int main() {
         THROWS(ProfileError, parse_display("[display]\nserver = host\nwm = i3\n", "o", "d"));  // Xephyr settings on a host session
         THROWS(ProfileError, parse_display("[display]\nserver = host\nsize = 800x600\n", "o", "d"));
         THROWS(ProfileError, parse_display("[display]\nserver = host\nxauth = no\n", "o", "d"));
+        THROWS(ProfileError, parse_display("[display]\nserver = host\nglamor = yes\n", "o", "d"));   // xephyr only
+        THROWS(ProfileError, parse_display("[display]\nserver = xephyr\nglamor = maybe\n", "o", "d"));
         THROWS(ProfileError, parse_display("[display]\nserver = xephyr\nbogus = 1\n", "o", "d"));
         THROWS(ProfileError, parse_display("[display]\nname = other\nserver = host\n", "o", "d"));  // must match the file name
     });
@@ -1015,6 +1033,10 @@ int main() {
         THROWS(PolicyError, build_plan(q, c));
         Profile r = parse_profile("[profile]\ncommand=sh\n[fs]\nrw = /usr/lib\n", "t");
         THROWS(PolicyError, build_plan(r, c));
+        Profile card = parse_profile("[profile]\ncommand=sh\n[gpu]\nmode = render\ndevice = /dev/dri/card0\n", "t");
+        THROWS(PolicyError, build_plan(card, c));                                        // KMS nodes are never a GPU surface
+        Profile disk = parse_profile("[profile]\ncommand=sh\n[gpu]\nmode = render\ndevice = /dev/sda\n", "t");
+        THROWS(PolicyError, build_plan(disk, c));
         fs::remove_all(d);
     });
 

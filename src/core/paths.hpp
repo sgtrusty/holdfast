@@ -35,11 +35,16 @@ std::string expand(const std::string& s, const VarCtx& c);
 Strings expand_glob(const std::string& s, const VarCtx& c);
 
 // ---- policy: blacklist / sensitive-root guard ---------------------------------
+// True for exactly /dev/dri/renderD<digits> after canonicalisation. KMS card nodes, /dev/nvidia* and anything else are not.
+bool is_render_node(const fs::path& p);
+
 class Policy {
 public:
     Policy(const User& u, const Strings& extra_deny);
     // Throws PolicyError when binding `src` (read-only or read-write) is forbidden.
-    void check_bind(const fs::path& src, bool rw) const;
+    // `gpu_render` is the explicit allowance for a [gpu] mode = render node: it only accepts is_render_node(src)
+    // and is the one read-write device bind allowed below /dev.
+    void check_bind(const fs::path& src, bool rw, bool gpu_render = false) const;
     // Throws PolicyError when `dir` must never be mounted as the working tree.
     void check_cwd(const fs::path& dir) const;
     const std::vector<fs::path>& deny() const { return deny_; }

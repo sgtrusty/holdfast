@@ -14,4 +14,7 @@ std::unique_ptr<Backend> open_x11(const Profile& p, const User& u, const fs::pat
 // MIT-MAGIC-COOKIE-1 authority file with a FamilyWild entry, so it matches regardless of the sandbox's (unshared) hostname.
 void write_xauth(const fs::path& file, const std::string& display_num, const std::string& cookie16);
 
+// Whether this Xephyr build advertises -glamor (from `Xephyr -help`). It is optional and build-dependent; `doctor` reports it.
+bool xephyr_advertises_glamor(const fs::path& xephyr);
+
 }  // namespace hf::display

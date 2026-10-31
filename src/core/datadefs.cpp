@@ -23,6 +23,13 @@ namespace {
 
 void words(Strings& dst, const std::string& v) { for (auto& w : split_ws(v)) dst.push_back(w); }
 
+bool as_bool(const IniLine& l, const std::string& o) {
+    const std::string v = lower(l.value);
+    if (v == "true" || v == "yes" || v == "1" || v == "on") return true;
+    if (v == "false" || v == "no" || v == "0" || v == "off") return false;
+    throw ProfileError(cat(o, ":", l.no, ": [", l.section, "] ", l.key, ": expects a boolean"));
+}
+
 }  // namespace
 
 bool valid_data_name(const std::string& n) {
@@ -289,7 +296,7 @@ DepRecipe parse_dep(const std::string& text, const std::string& origin, const st
 DisplayDef parse_display(const std::string& text, const std::string& origin, const std::string& name) {
     DisplayDef d;
     d.name = name;
-    bool have_server = false, size_set = false, xauth_set = false;
+    bool have_server = false, size_set = false, xauth_set = false, glamor_set = false;
     for (const IniLine& l : parse_ini(text, origin)) {
         if (l.section != "display") throw ProfileError(cat(origin, ":", l.no, ": unknown section [", l.section, "]"));
         if (l.key == "name") {
@@ -313,6 +320,9 @@ DisplayDef parse_display(const std::string& text, const std::string& origin, con
             else if (x == "no" || x == "false" || x == "off" || x == "0") d.xauth = false;
             else bad(l, origin, "expected yes|no");
             xauth_set = true;
+        } else if (l.key == "glamor") {
+            d.glamor = as_bool(l, origin);
+            glamor_set = true;
         } else if (l.key == "wm") {
             d.wm = l.value;
         } else {
@@ -321,8 +331,8 @@ DisplayDef parse_display(const std::string& text, const std::string& origin, con
     }
     if (!have_server) throw ProfileError(origin + ": [display] server = xephyr|host is required");
     const bool x11_nested = d.mode == DisplayMode::Nested;
-    if (!x11_nested && (size_set || xauth_set || !d.wm.empty()))
-        throw ProfileError(origin + ": size, xauth and wm configure Xephyr (server = xephyr); your host session has its own, and Wayland has no window manager to start");
+    if (!x11_nested && (size_set || xauth_set || glamor_set || !d.wm.empty()))
+        throw ProfileError(origin + ": size, xauth, glamor and wm configure Xephyr (server = xephyr); your host session has its own, and Wayland has no window manager to start");
     static const std::regex size_ok(R"(^\d{3,5}x\d{3,5}$)");
     if (x11_nested && !std::regex_match(d.size, size_ok)) throw ProfileError(origin + ": size must look like 1280x800");
     return d;

@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <cstdlib>
+#include <regex>
 
 namespace hf {
 
@@ -84,6 +85,11 @@ Strings expand_glob(const std::string& s, const VarCtx& c) {
 
 // ---- Policy ---------------------------------------------------------------------
 
+bool is_render_node(const fs::path& p) {
+    static const std::regex re("^/dev/dri/renderD[0-9]+$");
+    return std::regex_match(canon(p).string(), re);
+}
+
 Policy::Policy(const User& u, const Strings& extra) : user_(u) {
     const fs::path h = u.home;
     const char* home_rel[] = {
@@ -107,6 +113,9 @@ Policy::Policy(const User& u, const Strings& extra) : user_(u) {
                            "docker", "podman", "pipewire-0", "pulse"})
         deny_.push_back(canon(u.runtime_dir / r));
     VarCtx vc; vc.user = &u;
+    // Modesetting (card*) and NVIDIA control nodes are never a sandbox mount; only [gpu] mode = render may expose a render node.
+    for (const char* r : {"/dev/dri/card*", "/dev/nvidia*"})
+        for (auto& x : expand_glob(r, vc)) deny_.push_back(canon(x));
     for (auto& e : extra) for (auto& x : expand_glob(e, vc)) deny_.push_back(canon(x));
 }
 
@@ -124,8 +133,12 @@ bool Policy::is_sensitive_root(const fs::path& p) const {
     return false;
 }
 
-void Policy::check_bind(const fs::path& src, bool rw) const {
+void Policy::check_bind(const fs::path& src, bool rw, bool gpu_render) const {
     fs::path c = canon(src);
+    // The one explicit allowance: a DRM render node may be bound read-write, and only when the caller is [gpu] mode = render.
+    if (gpu_render && !is_render_node(c))
+        throw PolicyError(cat("'", c.string(), "' is not a DRM render node: [gpu] only accepts /dev/dri/renderD<number> "
+                              "(card* and NVIDIA nodes are never allowed)"));
     if (is_sensitive_root(c))
         throw PolicyError(cat("refusing to mount sensitive root '", c.string(), "' (pick a specific subdirectory)"));
     for (const auto& d : deny_) {
@@ -134,7 +147,7 @@ void Policy::check_bind(const fs::path& src, bool rw) const {
         if (path_under(d, c) && fs::exists(d))
             throw PolicyError(cat("'", c.string(), "' would expose denied path '", d.string(), "'"));
     }
-    if (rw) {
+    if (rw && !gpu_render) {
         for (const char* sys : {"/usr", "/etc", "/boot", "/bin", "/sbin", "/lib", "/lib64", "/proc", "/sys", "/dev", "/run/systemd", "/var/lib"})
             if (path_under(c, sys))
                 throw PolicyError(cat("refusing read-write mount of system path '", c.string(), "'"));

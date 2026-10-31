@@ -42,7 +42,7 @@ A profile only names one: `[display] use = x11-xephyr-i3`. The file in `data/dis
 
 | `server` | what happens |
 |---|---|
-| `xephyr` | X11. A private X server (Xephyr) with a random cookie; only its socket enters the sandbox. X needs a separate window manager, so the file can set `wm` (e.g. `i3`), plus `size` and `xauth` |
+| `xephyr` | X11. A private X server (Xephyr) with a random cookie; only its socket enters the sandbox. X needs a separate window manager, so the file can set `wm` (e.g. `i3`), plus `size` and `xauth`. `glamor = yes` (see `x11-xephyr-glamor`) makes Xephyr itself render through the GPU; clients still need the profile's `[gpu] mode = render` |
 | `host` | your real session: the Wayland compositor socket if `WAYLAND_DISPLAY` is set, otherwise your X server. Nothing else to configure (Wayland has no window-manager/server split). The sandbox profile must say `allow_host = yes`, because it hands over your screen and input |
 
 Each protocol is a backend in `src/protocol/display/` that turns the choice into plain data (files to bind, environment variables,

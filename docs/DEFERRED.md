@@ -53,9 +53,9 @@ checks (resize, Ctrl-C, mouse, exit) with `lazyvim` and `lazygit-dev`. Specific 
   "config probably wrong or stale" and keeps the packet counters and kernel view behind `-v`. The sudo/pty fix and the DISPLAY fix
   that followed have not been re-run end to end.
 - **Wayland is host-socket only.** `server = host` connects the sandbox to your real compositor when `WAYLAND_DISPLAY` is set (with consent). Still open: a nested
-  private compositor (cage/weston/sway, a new `server =` value, the Xephyr equivalent), the `wp_security_context_v1` protocol so a compositor can mark the sandbox as
-  restricted, and GPU access (`/dev/dri`, so software rendering is all a Wayland client gets today). The Wayland backend has not been run
-  against a real compositor yet; the X11 one was only moved, not changed.
+  private compositor (cage/weston/sway, a new `server =` value, the Xephyr equivalent) and the `wp_security_context_v1` protocol so a compositor can mark the sandbox as
+  restricted. The Wayland backend has not been run against a real compositor yet; the X11 one was only moved, not changed.
+  GPU access is independent of the protocol: `[gpu] mode = render` binds the DRM render node for both X11 and Wayland.
 - **`net=host`** shares the host network namespace, including abstract unix sockets (X11, some D-Bus), whatever
   `display = none` says. Prefer `net=pasta`. pasta (and host) still reach the LAN.
 - **Whitelisted binaries are a PATH allowlist, not an exec allowlist.** With `libs = full`, anything executable under
@@ -100,7 +100,8 @@ checks (resize, Ctrl-C, mouse, exit) with `lazyvim` and `lazygit-dev`. Specific 
   Possible fixes, none done: apk's `--usermode` where the Alpine release has it, or subordinate uid/gid ranges
   (`/etc/subuid`, `newuidmap`) the way rootless podman does. The second would also be needed by dpkg and pacman.
 - **Alpine only, so musl only.** Prebuilt Linux release binaries are almost always glibc, and a musl build cannot load the
-  host's glibc GPU drivers, so a bundle cannot produce something that runs accelerated on a glibc desktop. The plan is a
+  host's glibc *userspace* driver (NVIDIA proprietary). Mesa-based GPUs (AMD, Intel, nouveau) talk to the kernel through the
+  DRM render node and use the bundle's own Mesa, so `[gpu] mode = render` works in a bundle. The plan is a
   `distro =` key in `kind = bundle` files that selects a backend (`fetch_base`, `install_packages`, `verify`; the apk step is
   already isolated in `install_os_packages()`), with `alpine_*` kept as aliases:
 
@@ -111,8 +112,8 @@ checks (resize, Ctrl-C, mouse, exit) with `lazyvim` and `lazygit-dev`. Specific 
   | pinning | exact release; packages float inside it | `snapshot.debian.org` date | Arch Linux Archive date |
   | userns-root gotchas | setuid owners | dpkg `chown`/statoverride, `APT::Sandbox::User "root"`, no systemd triggers | `DisableSandbox`, keyring init or `SigLevel`, mirrors |
 
-  Every backend shares the one-uid problem above. A GPU option for bundle profiles (`/dev/dri`) only makes sense once the
-  bundle's libc can match the host drivers, so it waits for this.
+  Every backend shares the one-uid problem above. NVIDIA's proprietary driver still needs a glibc userland; Mesa-based
+  render-node access is available in the current Alpine bundle.
 - **Deps cannot write to the working tree.** A recipe sees only `$HOME`, so files a project build wants under its own tree
   must be copied there by the build step. An opt-in, per-recipe read-write bind of one subdirectory was considered and left
   out for now: it lets an install step (often fetching code from the internet) write into your repository, so it needs the

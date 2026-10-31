@@ -205,13 +205,16 @@ description = private X11 server (Xephyr) with the i3 window manager
 server = xephyr          # xephyr | host   (required)
 size   = 1920x1280       # xephyr only, default 1280x800
 xauth  = yes             # xephyr only, default yes: private cookie file
+glamor = no              # xephyr only, default no: start Xephyr with -glamor (GPU-backed, needs an Xephyr built with it)
 wm     = i3              # xephyr only: shell snippet started in the sandbox; needs `sh` in [bin] allow on host-root profiles
 ```
 
-- `server = xephyr` is a private X11 server. X needs a separate window manager, hence `wm`.
+- `server = xephyr` is a private X11 server. X needs a separate window manager, hence `wm`. `glamor = yes` starts Xephyr with
+  `-glamor`; it needs an Xephyr build that advertises it (see `holdfast doctor`) and, for clients to render on the GPU, the
+  sandbox profile's `[gpu] mode = render`.
 - `server = host` is your real session: Wayland when `WAYLAND_DISPLAY` is set, otherwise X11. It takes no other keys (Wayland
   needs no window manager, cookie or size). The sandbox profile must also say `[display] allow_host = yes`; consent is never in the shared file.
-- Keys that do not apply are errors. Shipped: `x11-xephyr`, `x11-xephyr-i3`, `host`. `holdfast list displays` shows what is visible.
+- Keys that do not apply are errors. Shipped: `x11-xephyr`, `x11-xephyr-i3`, `x11-xephyr-glamor`, `host`. `holdfast list displays` shows what is visible.
 
 ## How a minimal profile resolves (run time, no ELF parsing)
 

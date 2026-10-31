@@ -25,5 +25,6 @@ plugin) running as your uid, able to execute arbitrary code *inside* the sandbox
 | Tampered bundle download | HTTPS-only, sha256 verify, optional pin | Unpinned hash is same-origin; no GPG yet |
 | Stale network state / leaked rules | Lock + tag sweep + RAII teardown + `net-cleanup` | `SIGKILL` of holdfast leaves state until next run/`net-cleanup` |
 | Kernel / syscall-surface exploits | userns + caps dropped + pid/ipc/uts/cgroup ns | No built-in seccomp yet |
+| GPU driver attack surface | No `/dev/dri` unless the profile opts in with `[gpu] mode = render`; only `renderD*` nodes (never `card*`/`/dev/nvidia*`), and the node must be openable by your user | A render node exposes the kernel GPU driver's ioctl surface; GPU memory/context isolation is the driver's, not holdfast's. ioctl is not further filtered |
 
 **Out of scope:** a compromised host, malicious root, kernel 0-days, hardware attacks, covert timing channels.

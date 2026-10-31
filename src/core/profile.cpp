@@ -176,6 +176,16 @@ void parse_onto(Profile& p, const std::string& text, const std::string& o) {
             if (k == "protect") p.git_protect = as_bool(l, o); else bad(l, o, "unknown key");
         } else if (s == "fonts") {
             if (k == "allow") append_words(p.font_families, v); else bad(l, o, "unknown key");
+        } else if (s == "gpu") {
+            if (k == "mode") {
+                std::string x = lower(v);
+                if (x == "none") p.gpu = GpuMode::None;
+                else if (x == "render") p.gpu = GpuMode::Render;
+                else bad(l, o, "expected none|render");
+            } else if (k == "device") {
+                if (v.empty()) bad(l, o, "expected a render node such as /dev/dri/renderD128");
+                p.gpu_devices.push_back(v);
+            } else bad(l, o, "unknown key");
         } else if (s == "bundle") {
             if (k == "provision")
                 bad(l, o, "moved out of profiles: write each install step as data/dep/NAME.profile and list it under [deps] use = NAME");
@@ -202,6 +212,8 @@ void parse_onto(Profile& p, const std::string& text, const std::string& o) {
 Profile parse_profile(const std::string& text, const std::string& o) {
     Profile p;
     parse_onto(p, text, o);
+    if (p.gpu != GpuMode::Render && !p.gpu_devices.empty())
+        throw ProfileError(o + ": [gpu] device needs mode = render (mode = render is the opt-in; device alone binds nothing)");
     check_dns(p, o);
     return p;
 }

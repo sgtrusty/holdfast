@@ -4,8 +4,10 @@
 
 #include "cli/args.hpp"
 #include "core/datadefs.hpp"
+#include "core/gpu.hpp"
 #include "core/launch.hpp"
 #include "core/seccomp.hpp"
+#include "protocol/display/x11.hpp"
 #include "util/style.hpp"
 #include "util/sys.hpp"
 
@@ -131,6 +133,39 @@ int doctor() {
         if (!f.missing_optional.empty()) note = "also useful: " + join(f.missing_optional, " ");
         if (f.ready()) feature_row(f.name, true, note, st.g);
         else feature_row(f.name, false, "needs " + join(need, ", "), st.y);
+    }
+
+    head("GPU");
+    const Strings nodes = find_render_nodes();
+    if (nodes.empty()) {
+        row("warn", st.y, "render nodes", "none under /dev/dri; [gpu] mode = render would fail (driver not loaded?)");
+    } else {
+        for (const std::string& n : nodes) {
+            std::string why;
+            const bool ok = render_node_openable(n, &why);
+            const std::string driver = render_node_driver(n);
+            row(ok ? " ok " : "warn", ok ? st.g : st.y, n,
+                cat(driver.empty() ? "driver unknown" : "driver " + driver, ok ? ", openable" : ", NOT openable: " + why));
+        }
+    }
+    bool glamor_configured = false;
+    try {
+        const User u = resolve_user();
+        for (const std::string& r : data_roots(u.home.string()))
+            for (const std::string& d : list_data({r}, "display")) {
+                try { if (load_display(d, {r}).glamor) glamor_configured = true; }
+                catch (const Error&) {}
+            }
+    } catch (const Error&) {}
+    const auto xephyr = which("Xephyr");
+    if (xephyr) {
+        const bool advertised = display::xephyr_advertises_glamor(*xephyr);
+        row(advertised || !glamor_configured ? " ok " : "warn", advertised || !glamor_configured ? st.g : st.y, "Xephyr glamor",
+            advertised ? "advertised (-glamor)" :
+                         glamor_configured ? "not advertised, but a display file sets glamor = yes: update/rebuild Xephyr or set glamor = no"
+                                           : "not advertised (only display files with glamor = yes need it)");
+    } else {
+        row("warn", st.y, "Xephyr glamor", glamor_configured ? "Xephyr not found, but a display file sets glamor = yes" : "Xephyr not found");
     }
 
     if (bad) std::printf("\n%s%d required item%s missing: holdfast cannot run sandboxes on this host until fixed.%s\n", st.x, bad, bad == 1 ? "" : "s", st.r);
